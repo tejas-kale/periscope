@@ -237,6 +237,7 @@ input[type='search'],
 }
 .sandbox {
   cursor: pointer;
+  -webkit-app-region: no-drag; /* the header is a window-drag region, which swallows clicks */
 }
 .sandbox-msg {
   margin: 0 12px 6px;
