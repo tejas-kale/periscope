@@ -1,4 +1,5 @@
 import type { Agent, Host, LineParser } from './types.ts';
+import type { Store } from './store.ts';
 import { claudeParser } from './parsers/claude.ts';
 import { codexParser } from './parsers/codex.ts';
 import { antigravityParser } from './parsers/antigravity.ts';
@@ -95,4 +96,12 @@ export function parseAgyMetadata(json: string): Record<string, AgyMeta> {
     /* tolerate a half-written file */
   }
   return out;
+}
+
+/** Update titles and workspaces of Antigravity sessions already in the index. */
+export function applyAgyMeta(store: Store, host: Host, metas: Record<string, AgyMeta>): void {
+  for (const [id, m] of Object.entries(metas)) {
+    const sid = sessionIdFor(host, id);
+    if (store.getSession(sid)) store.updateSession(sid, { title: m.title, cwd: m.cwd, project: projectName(m.cwd) });
+  }
 }

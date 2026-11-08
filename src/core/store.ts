@@ -96,6 +96,10 @@ export class Store {
     ).run(f.path, f.host, f.offset, n(f.mtime), n(f.session_id), n(f.state));
   }
 
+  filesForHost(host: Host): FileRecord[] {
+    return this.stmt('SELECT * FROM files WHERE host = ?').all(host) as FileRecord[];
+  }
+
   filesForSession(sessionId: string): FileRecord[] {
     return this.stmt('SELECT * FROM files WHERE session_id = ?').all(sessionId) as FileRecord[];
   }
