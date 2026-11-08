@@ -5,3 +5,4 @@ release/
 .threads/
 .venv/
 *.db
+.DS_Store
