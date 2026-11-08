@@ -2,6 +2,7 @@ import type { Agent } from './types.ts';
 import { AGENT_DIRS, AGY_METADATA, applyAgyMeta, classify, parseAgyMetadata, type AgyMeta } from './sources.ts';
 import type { Ingestor } from './ingest.ts';
 import type { Store } from './store.ts';
+import { aliveInSandbox, parseClaudeProcs, type ClaudeProc } from './presence.ts';
 
 /** Podman volumes the sandbox keeps agent homes in, and where each agent's transcripts live inside them. */
 export const VOLUMES: { name: string; roots: { agent: Agent; dir: string }[]; sidecars: string[] }[] = [
@@ -31,6 +32,8 @@ export interface PollRequest {
   sidecars: { path: string; mtime: number }[];
   maxBytes: number;
   maxTotal: number;
+  /** Directories of Claude Code's process registry (`sessions/<pid>.json`) to return in full. */
+  presence?: string[];
 }
 
 export interface PollFile {
@@ -46,6 +49,10 @@ export interface PollResponse {
   sidecars: Record<string, { mtime: number; data: string }>;
   /** Files that could not be read (e.g. EACCES), one message each. */
   errors?: string[];
+  /** Registry file contents from `presence` directories. */
+  presence?: string[];
+  /** The VM's clock when the script ran, to correct mtimes for clock drift. */
+  now?: number;
 }
 
 /**
@@ -57,7 +64,12 @@ const fs = require('fs'), path = require('path');
 let input = '';
 process.stdin.on('data', (d) => (input += d)).on('end', () => {
   const req = JSON.parse(input);
-  const out = { files: [], metas: {}, sidecars: {}, errors: [] };
+  const out = { files: [], metas: {}, sidecars: {}, errors: [], presence: [], now: Date.now() };
+  for (const d of req.presence || []) {
+    let names = [];
+    try { names = fs.readdirSync(d); } catch {}
+    for (const n of names) if (n.endsWith('.json')) { try { out.presence.push(fs.readFileSync(path.join(d, n), 'utf8')); } catch {} }
+  }
   let budget = req.maxTotal;
   const walk = (dir, depth) => {
     let ents;
@@ -128,6 +140,21 @@ export function failureMessage(stderr: string, code: number): string {
   return err ?? lines.filter((l) => !/^Node\.js v/.test(l) && !l.startsWith('at ')).pop() ?? `podman exited ${code}`;
 }
 
+/** Start times (ms, VM clock) of running sandbox containers from `podman ps --format json`, leaving out Periscope's own poll containers. */
+export function sandboxContainerStarts(json: string, image: string): number[] {
+  const base = (s: string) => s.replace(/:[^:/]+$/, '');
+  try {
+    const list = JSON.parse(json);
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((c) => typeof c?.Image === 'string' && base(c.Image) === base(image) && !c.Labels?.['periscope.poll'])
+      .map((c) => Number(c.StartedAt) * 1000)
+      .filter((t) => t > 0);
+  } catch {
+    return [];
+  }
+}
+
 /** Key a sandbox file by volume and in-volume path, e.g. `podman:claude-home:projects/p/x.jsonl`. */
 export const sandboxPath = (volume: string, rel: string) => `podman:${volume}:${rel}`;
 
@@ -141,6 +168,8 @@ export interface PollerOptions {
   maxTotal?: number;
   onStatus?: (s: SandboxStatus) => void;
   onIngested?: (sessionIds: string[]) => void;
+  /** Claude Code processes alive in the sandbox, after each poll. */
+  onPresence?: (procs: ClaudeProc[]) => void;
 }
 
 /**
@@ -150,7 +179,7 @@ export interface PollerOptions {
 export class PodmanPoller {
   status: SandboxStatus = { state: 'unknown' };
   private running = false;
-  private o: Required<Omit<PollerOptions, 'onStatus' | 'onIngested'>> & Pick<PollerOptions, 'onStatus' | 'onIngested'>;
+  private o: Required<Omit<PollerOptions, 'onStatus' | 'onIngested' | 'onPresence'>> & Pick<PollerOptions, 'onStatus' | 'onIngested' | 'onPresence'>;
   private volumes: string[] | null = null;
   private volumesAt = 0;
   private sidecarMtime: Record<string, number> = {};
@@ -195,7 +224,8 @@ export class PodmanPoller {
     if (!vols.length) return this.setStatus({ state: 'online', message: 'no sandbox volumes yet' });
 
     const mount = (v: string) => `/v/${v}`;
-    const req: PollRequest = { roots: [], known: {}, sidecars: [], maxBytes: this.o.maxBytes, maxTotal: this.o.maxTotal };
+    const req: PollRequest = { roots: [], known: {}, sidecars: [], maxBytes: this.o.maxBytes, maxTotal: this.o.maxTotal, presence: [] };
+    if (vols.some((v) => v.name === 'claude-home')) req.presence!.push(`${mount('claude-home')}/sessions`);
     for (const v of vols) {
       for (const r of v.roots) req.roots.push({ mount: mount(v.name), dir: r.dir });
       for (const s of v.sidecars) {
@@ -211,19 +241,36 @@ export class PodmanPoller {
 
     // Rootless podman: the volume files belong to the user that runs podman, which is root inside a container
     // without --userns=keep-id. Transcripts are mode 600, so the image's own user cannot read them.
-    const args = ['run', '--rm', '-i', '--network', 'none', '--pull', 'never', '--user', '0:0', '--entrypoint', 'node'];
+    const args = ['run', '--rm', '-i', '--network', 'none', '--pull', 'never', '--user', '0:0', '--label', 'periscope.poll=1', '--entrypoint', 'node'];
     for (const v of vols) args.push('-v', `${v.name}:${mount(v.name)}:ro`);
     args.push(this.o.image, '-e', POLL_SCRIPT);
     const r = await exec(podman, args, JSON.stringify(req));
     if (r.code !== 0) return this.setStatus({ state: classifyFailure(r.stderr), message: failureMessage(r.stderr, r.code) });
     const res = JSON.parse(r.stdout) as PollResponse;
     this.apply(res, vols);
+    await this.updatePresence(parseClaudeProcs(res.presence ?? []));
     const errs = res.errors ?? [];
     this.setStatus({ state: 'online', message: errs.length ? `${errs.length} file(s) unreadable, e.g. ${errs[0]}` : undefined });
   }
 
+  private containersAt = 0;
+  private containerStarts: number[] = [];
+
+  /** Registry entries count as open only while a sandbox container that could own them runs (checked every 5 s). */
+  private async updatePresence(procs: ClaudeProc[]) {
+    if (!this.o.onPresence) return;
+    if (procs.length && Date.now() - this.containersAt > 5_000) {
+      const r = await this.o.exec(this.o.podman, ['ps', '--format', 'json']);
+      this.containersAt = Date.now();
+      if (r.code === 0) this.containerStarts = sandboxContainerStarts(r.stdout, this.o.image);
+    }
+    this.o.onPresence(aliveInSandbox(procs, this.containerStarts));
+  }
+
   /** Ingest a poll response; exposed for tests. */
   apply(res: PollResponse, vols = VOLUMES) {
+    // The Podman VM's clock drifts from the Mac's (notably after sleep); shift mtimes onto the Mac's clock.
+    const skew = res.now ? Date.now() - res.now : 0;
     Object.assign(this.metas, res.metas);
     for (const [p, s] of Object.entries(res.sidecars)) {
       this.sidecarMtime[p] = s.mtime;
@@ -257,7 +304,7 @@ export class PodmanPoller {
         file,
         path: key,
         size: f.size,
-        mtime: f.mtime,
+        mtime: f.mtime + skew,
         start,
         bytes: Buffer.from(f.data, 'base64'),
         parentToolUseId,

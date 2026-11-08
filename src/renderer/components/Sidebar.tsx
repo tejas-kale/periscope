@@ -29,7 +29,7 @@ function SessionItem({ s, active, cursor, onClick, children }: { s: SessionRow; 
   return (
     <li className={`session ${active ? 'active' : ''} ${cursor ? 'cursor' : ''}`} data-key={`s:${s.id}`} onClick={onClick} title={s.cwd ?? s.source_path}>
       <div className="session-line">
-        {s.status === 'live' && <LiveDot />}
+        <LiveDot status={s.status} />
         <span className="session-title">{s.title || s.id}</span>
         <span className="session-time">{relTime(s.updated_at)}</span>
       </div>
@@ -185,7 +185,7 @@ export function Sidebar(p: {
         </select>
         <select value={f.status ?? ''} onChange={(e) => set({ status: (e.target.value || undefined) as any })} aria-label="Status">
           <option value="">Any status</option>
-          <option value="live">Live</option>
+          <option value="live">Open or running</option>
           <option value="idle">Idle</option>
         </select>
         <label>

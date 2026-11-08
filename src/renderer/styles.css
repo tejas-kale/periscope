@@ -330,6 +330,8 @@ input[type='search'],
   border-radius: 50%;
   background: var(--live);
   flex: none;
+}
+.live-dot.live {
   animation: pulse 1.6s ease-in-out infinite;
 }
 @keyframes pulse {

@@ -85,6 +85,8 @@ export function HostMarker({ host }: { host: Host }) {
   );
 }
 
-export function LiveDot() {
-  return <span className="live-dot" title="Live: changed in the last 30 s" />;
+/** Green dot: pulsing while the agent is working, solid while the session is open and waiting. */
+export function LiveDot({ status }: { status: 'live' | 'open' | 'idle' }) {
+  if (status === 'idle') return null;
+  return <span className={`live-dot ${status}`} title={status === 'live' ? 'Running: the agent is working' : 'Open: waiting for input'} />;
 }

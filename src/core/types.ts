@@ -27,7 +27,8 @@ export interface SessionRow {
   title: string | null;
   started_at: number | null;
   updated_at: number | null;
-  status: 'live' | 'idle';
+  /** live: running (Claude busy, or written in the last 30 s); open: a Claude Code process has it open, waiting. */
+  status: 'live' | 'open' | 'idle';
   source_path: string;
 }
 
@@ -68,6 +69,7 @@ export interface LineParser<S> {
 export interface SessionFilter {
   agent?: Agent;
   host?: Host;
+  /** live: running or open; idle: neither. */
   status?: 'live' | 'idle';
   from?: number;
   to?: number;

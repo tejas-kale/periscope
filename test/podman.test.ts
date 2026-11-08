@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { FIXTURES, memStore } from './helpers.ts';
 import { Ingestor } from '../src/core/ingest.ts';
-import { PodmanPoller, POLL_SCRIPT, classifyFailure, failureMessage, type Exec } from '../src/core/podman.ts';
+import { PodmanPoller, POLL_SCRIPT, classifyFailure, failureMessage, sandboxContainerStarts, type Exec } from '../src/core/podman.ts';
 
 const SESSION = '9fde03bf-efa5-480b-8289-14c5e1d865da';
 
@@ -15,6 +15,7 @@ function fakePodman(root: string, calls: string[][]): Exec {
   return async (_cmd, args, input) => {
     calls.push(args);
     if (args[0] === 'volume') return { code: 0, stdout: 'claude-home\nagy-home\nother\n', stderr: '' };
+    if (args[0] === 'ps') return { code: 0, stdout: JSON.stringify([{ Image: 'localhost/agent-sandbox:latest', StartedAt: 1_000, Labels: {} }]), stderr: '' };
     const script = args[args.indexOf('-e') + 1];
     const req = input!.replaceAll('"/v/', JSON.stringify(root + '/v/').slice(0, -1));
     const r = spawnSync(process.execPath, ['-e', script], { input: req, encoding: 'utf8' });
@@ -129,4 +130,28 @@ test('failure message keeps the error line from a node crash, not the version fo
   assert.equal(failureMessage(stderr, 1), "Error: EACCES: permission denied, open '/v/claude-home/projects/p/x.jsonl'");
   assert.equal(failureMessage('Error: invalid reference format\n', 125), 'Error: invalid reference format');
   assert.equal(failureMessage('', 2), 'podman exited 2');
+});
+
+test('poller reports Claude processes alive in the sandbox', async () => {
+  const { root } = setupVolumes();
+  const sessions = path.join(root, 'v/claude-home/sessions');
+  fs.mkdirSync(sessions);
+  fs.writeFileSync(path.join(sessions, '1.json'), JSON.stringify({ pid: 1, sessionId: 'live', status: 'busy', startedAt: 1_000_500 }));
+  fs.writeFileSync(path.join(sessions, '455.json'), JSON.stringify({ pid: 455, sessionId: 'dead', status: 'idle', startedAt: 10 }));
+  fs.writeFileSync(path.join(sessions, '1.abc.key'), 'secret');
+  const store = memStore();
+  let seen: string[] = [];
+  const poller = new PodmanPoller({ exec: fakePodman(root, []), ingestor: new Ingestor(store), store, onPresence: (p) => (seen = p.map((x) => x.sessionId)) });
+  await poller.tick();
+  assert.deepEqual(seen, ['live']);
+});
+
+test('sandbox containers: own poll containers and other images are left out', () => {
+  const ps = JSON.stringify([
+    { Image: 'localhost/agent-sandbox:latest', StartedAt: 5, Labels: null },
+    { Image: 'localhost/agent-sandbox:latest', StartedAt: 9, Labels: { 'periscope.poll': '1' } },
+    { Image: 'docker.io/library/postgres:16', StartedAt: 1, Labels: {} },
+  ]);
+  assert.deepEqual(sandboxContainerStarts(ps, 'localhost/agent-sandbox:latest'), [5000]);
+  assert.deepEqual(sandboxContainerStarts('not json', 'x'), []);
 });

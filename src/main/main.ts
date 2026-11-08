@@ -9,7 +9,8 @@ import { Store, type SqlDb } from '../core/store.ts';
 import { Ingestor } from '../core/ingest.ts';
 import { NativeReader, nativeRoots } from '../core/native.ts';
 import { DEFAULT_IMAGE, PodmanPoller, type Exec } from '../core/podman.ts';
-import type { SandboxState, SessionFilter } from '../core/types.ts';
+import type { SandboxState, SessionFilter, SessionRow } from '../core/types.ts';
+import { parseClaudeProcs, presenceChanges, presenceMap, type ClaudeProc, type Presence } from '../core/presence.ts';
 
 const POLL_MS = 1500;
 const DEV_URL = process.env.PERISCOPE_DEV_URL;
@@ -33,6 +34,59 @@ function notify(ids: string[]) {
 function setSandbox(s: SandboxState) {
   sandbox = s;
   win?.webContents.send('periscope:sandbox', s);
+}
+
+// ---- presence: which Claude Code sessions are open or running ----
+let nativeProcs: ClaudeProc[] = [];
+let sandboxProcs: ClaudeProc[] = [];
+let presence = new Map<string, Presence>();
+
+function refreshPresence() {
+  const next = presenceMap([
+    { prefix: 'n:', procs: nativeProcs },
+    { prefix: 's:', procs: sandboxProcs },
+  ]);
+  const changed = presenceChanges(presence, next);
+  presence = next;
+  if (changed.length) notify(changed);
+}
+
+const isAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/** Claude Code on the Mac: `~/.claude/sessions/<pid>.json`, kept while that pid is alive. */
+function startNativePresence() {
+  const dir = path.join(os.homedir(), '.claude', 'sessions');
+  const scan = async () => {
+    let names: string[] = [];
+    try {
+      names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.json'));
+    } catch {
+      /* no Claude Code on this Mac */
+    }
+    const texts = await Promise.all(names.map((n) => fs.promises.readFile(path.join(dir, n), 'utf8').catch(() => '')));
+    nativeProcs = parseClaudeProcs(texts).filter((p) => isAlive(p.pid));
+    refreshPresence();
+  };
+  void scan();
+  setInterval(() => void scan(), 2_000);
+}
+
+/** Apply presence to listed sessions; the status filter sees the result. */
+function listSessions(store: Store, f: SessionFilter): SessionRow[] {
+  const rows = store.listSessions({ ...f, status: undefined });
+  for (const r of rows) {
+    const p = presence.get(r.id);
+    if (p === 'running') r.status = 'live';
+    else if (p === 'open' && r.status !== 'live') r.status = 'open';
+  }
+  return f.status === 'live' ? rows.filter((r) => r.status !== 'idle') : f.status === 'idle' ? rows.filter((r) => r.status === 'idle') : rows;
 }
 
 // ---- podman ----
@@ -101,6 +155,7 @@ function startSandbox(store: Store, ingestor: Ingestor) {
     image: process.env.PERISCOPE_SANDBOX_IMAGE || DEFAULT_IMAGE,
     onStatus: (s) => setSandbox({ state: s.state, message: s.message }),
     onIngested: notify,
+    onPresence: (procs) => ((sandboxProcs = procs), refreshPresence()),
   });
   void poller.tick();
   setInterval(() => void poller.tick(), POLL_MS);
@@ -108,7 +163,7 @@ function startSandbox(store: Store, ingestor: Ingestor) {
 
 function registerIpc(store: Store) {
   const { roots } = nativeRoots(os.homedir());
-  ipcMain.handle('periscope:listSessions', (_e, f: SessionFilter) => store.listSessions(f ?? {}));
+  ipcMain.handle('periscope:listSessions', (_e, f: SessionFilter) => listSessions(store, f ?? {}));
   ipcMain.handle('periscope:getEvents', (_e, id: string, since?: number) => store.getEvents(id, since ?? -1));
   ipcMain.handle('periscope:getRaw', (_e, id: string) => store.getRaw(id));
   ipcMain.handle('periscope:search', (_e, q: string, f: SessionFilter) => store.search(q, f ?? {}));
@@ -174,6 +229,7 @@ app.whenReady().then(() => {
   createWindow();
   startNative(store, ingestor);
   startSandbox(store, ingestor);
+  startNativePresence();
   setInterval(() => {
     const ids = store.expireLive(Date.now());
     if (ids.length) notify(ids);

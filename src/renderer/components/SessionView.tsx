@@ -237,7 +237,7 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
     <section className="session-view">
       <header className="sv-head">
         <div className="sv-title">
-          {session.status === 'live' && <LiveDot />}
+          <LiveDot status={session.status} />
           <h2>{session.title || session.id}</h2>
           <AgentBadge agent={session.agent} />
           <HostMarker host={session.host} />

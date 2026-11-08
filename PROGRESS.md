@@ -43,4 +43,8 @@ click shows the Podman error.
   tool results are the GENERIC steps after a PLANNER_RESPONSE, matched in order.
 - Sandbox layout: `claude-home` = `~/.claude` (Codex at `codex/sessions`), `agy-home` = `~/.gemini`.
 - Tests use `node:sqlite` behind the `SqlDb` interface; the app uses `better-sqlite3`.
+- Presence: Claude Code's `~/.claude/sessions/<pid>.json` registry (busy = running, idle = open). Native entries
+  count while the pid is alive; sandbox entries while a sandbox container started before them still runs
+  (`podman ps`, poll containers carry `periscope.poll=1`). Codex and Antigravity: written in the last 30 s.
+  Sandbox mtimes are shifted by the VM clock skew (poll script returns its `Date.now()`).
 - In-session search is client-side, highlighted with the CSS Custom Highlight API; global search is FTS5.
