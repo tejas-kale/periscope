@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { FIXTURES, memStore } from './helpers.ts';
 import { Ingestor } from '../src/core/ingest.ts';
-import { PodmanPoller, POLL_SCRIPT, classifyFailure, type Exec } from '../src/core/podman.ts';
+import { PodmanPoller, POLL_SCRIPT, classifyFailure, failureMessage, type Exec } from '../src/core/podman.ts';
 
 const SESSION = '9fde03bf-efa5-480b-8289-14c5e1d865da';
 
@@ -51,6 +51,7 @@ test('poller ingests sandbox sessions, then only appended bytes', async () => {
   assert.ok(run.includes('claude-home:/v/claude-home:ro') && run.includes('agy-home:/v/agy-home:ro'), 'volumes mounted read-only');
   assert.ok(!run.some((a) => a.startsWith('other:')), 'only known volumes are mounted');
   assert.ok(run.includes('--rm') && run.includes('localhost/agent-sandbox:latest'));
+  assert.equal(run[run.indexOf('--user') + 1], '0:0', 'runs as container root, which owns the volume files in rootless podman');
 
   const sid = `s:${SESSION}`;
   const s = store.getSession(sid)!;
@@ -107,4 +108,25 @@ test('poll script re-reads a file that shrank from zero', () => {
   const out = JSON.parse(r.stdout);
   assert.equal(out.files[0].start, 0);
   assert.equal(Buffer.from(out.files[0].data, 'base64').toString(), 'abc\n');
+});
+
+test('poll script reports an unreadable transcript instead of crashing', { skip: process.getuid?.() === 0 }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'periscope-s-'));
+  fs.mkdirSync(path.join(dir, 'projects/p'), { recursive: true });
+  const bad = path.join(dir, 'projects/p/bad.jsonl');
+  const good = path.join(dir, 'projects/p/good.jsonl');
+  fs.writeFileSync(bad, 'secret\n', { mode: 0o000 });
+  fs.writeFileSync(good, 'ok\n');
+  const r = spawnSync(process.execPath, ['-e', POLL_SCRIPT], { input: JSON.stringify({ roots: [{ mount: dir, dir: 'projects' }], known: {}, sidecars: [], maxBytes: 1e6, maxTotal: 1e6 }), encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(Buffer.from(out.files.find((f: any) => f.p === good).data, 'base64').toString(), 'ok\n');
+  assert.match(out.errors[0], /EACCES.*bad\.jsonl/);
+});
+
+test('failure message keeps the error line from a node crash, not the version footer', () => {
+  const stderr = `node:fs:573\n  return binding.open(\n                 ^\n\nError: EACCES: permission denied, open '/v/claude-home/projects/p/x.jsonl'\n    at Object.openSync (node:fs:573:18)\n    at walk ([eval]:23:20) {\n  errno: -13,\n  code: 'EACCES'\n}\n\nNode.js v22.23.4\n`;
+  assert.equal(failureMessage(stderr, 1), "Error: EACCES: permission denied, open '/v/claude-home/projects/p/x.jsonl'");
+  assert.equal(failureMessage('Error: invalid reference format\n', 125), 'Error: invalid reference format');
+  assert.equal(failureMessage('', 2), 'podman exited 2');
 });

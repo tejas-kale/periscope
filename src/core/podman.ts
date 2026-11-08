@@ -44,6 +44,8 @@ export interface PollResponse {
   files: PollFile[];
   metas: Record<string, string>;
   sidecars: Record<string, { mtime: number; data: string }>;
+  /** Files that could not be read (e.g. EACCES), one message each. */
+  errors?: string[];
 }
 
 /**
@@ -55,7 +57,7 @@ const fs = require('fs'), path = require('path');
 let input = '';
 process.stdin.on('data', (d) => (input += d)).on('end', () => {
   const req = JSON.parse(input);
-  const out = { files: [], metas: {}, sidecars: {} };
+  const out = { files: [], metas: {}, sidecars: {}, errors: [] };
   let budget = req.maxTotal;
   const walk = (dir, depth) => {
     let ents;
@@ -77,12 +79,18 @@ process.stdin.on('data', (d) => (input += d)).on('end', () => {
       if (st.size > start && budget > 0) {
         const len = Math.min(st.size - start, req.maxBytes, budget);
         const buf = Buffer.alloc(len);
-        const fd = fs.openSync(p, 'r');
-        const n = fs.readSync(fd, buf, 0, len, start);
-        fs.closeSync(fd);
-        budget -= n;
-        f.start = start;
-        f.data = buf.subarray(0, n).toString('base64');
+        let fd;
+        try {
+          fd = fs.openSync(p, 'r');
+          const n = fs.readSync(fd, buf, 0, len, start);
+          budget -= n;
+          f.start = start;
+          f.data = buf.subarray(0, n).toString('base64');
+        } catch (err) {
+          out.errors.push(String(err && err.message || err));
+        } finally {
+          if (fd !== undefined) fs.closeSync(fd);
+        }
       }
       out.files.push(f);
     }
@@ -111,6 +119,13 @@ const OFFLINE = /cannot connect|connection refused|no such file or directory.*so
 
 export function classifyFailure(stderr: string): SandboxStatus['state'] {
   return OFFLINE.test(stderr) ? 'offline' : 'error';
+}
+
+/** The useful line of a failed podman run's stderr: Node crashes end with stack frames and a `Node.js vX` footer. */
+export function failureMessage(stderr: string, code: number): string {
+  const lines = stderr.split('\n').map((l) => l.trim()).filter(Boolean);
+  const err = lines.find((l) => /^(\w*Error|Error)\b.*:/.test(l));
+  return err ?? lines.filter((l) => !/^Node\.js v/.test(l) && !l.startsWith('at ')).pop() ?? `podman exited ${code}`;
 }
 
 /** Key a sandbox file by volume and in-volume path, e.g. `podman:claude-home:projects/p/x.jsonl`. */
@@ -171,7 +186,7 @@ export class PodmanPoller {
     const { exec, podman } = this.o;
     if (!this.volumes || Date.now() - this.volumesAt > 30_000) {
       const r = await exec(podman, ['volume', 'ls', '--format', '{{.Name}}']);
-      if (r.code !== 0) return this.setStatus({ state: classifyFailure(r.stderr), message: r.stderr.trim() || `podman exited ${r.code}` });
+      if (r.code !== 0) return this.setStatus({ state: classifyFailure(r.stderr), message: failureMessage(r.stderr, r.code) });
       this.volumes = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
       this.volumesAt = Date.now();
     }
@@ -194,14 +209,17 @@ export class PodmanPoller {
     }
     for (const p of Object.keys(this.metas)) req.known[p] = 0;
 
-    const args = ['run', '--rm', '-i', '--network', 'none', '--pull', 'never', '--entrypoint', 'node'];
+    // Rootless podman: the volume files belong to the user that runs podman, which is root inside a container
+    // without --userns=keep-id. Transcripts are mode 600, so the image's own user cannot read them.
+    const args = ['run', '--rm', '-i', '--network', 'none', '--pull', 'never', '--user', '0:0', '--entrypoint', 'node'];
     for (const v of vols) args.push('-v', `${v.name}:${mount(v.name)}:ro`);
     args.push(this.o.image, '-e', POLL_SCRIPT);
     const r = await exec(podman, args, JSON.stringify(req));
-    if (r.code !== 0) return this.setStatus({ state: classifyFailure(r.stderr), message: r.stderr.trim().split('\n').pop() || `podman exited ${r.code}` });
+    if (r.code !== 0) return this.setStatus({ state: classifyFailure(r.stderr), message: failureMessage(r.stderr, r.code) });
     const res = JSON.parse(r.stdout) as PollResponse;
     this.apply(res, vols);
-    this.setStatus({ state: 'online' });
+    const errs = res.errors ?? [];
+    this.setStatus({ state: 'online', message: errs.length ? `${errs.length} file(s) unreadable, e.g. ${errs[0]}` : undefined });
   }
 
   /** Ingest a poll response; exposed for tests. */

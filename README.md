@@ -26,7 +26,8 @@ The index is `~/Library/Application Support/Periscope/periscope.db`. Delete it t
 | Antigravity | `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl` | `agy-home:/antigravity-cli/brain/...` |
 
 The sandbox is polled every 1.5 s with a throwaway read-only container
-(`podman run --rm -i --network none -v <volume>:/v/<volume>:ro --entrypoint node <image> -e <script>`).
+(`podman run --rm -i --network none --user 0:0 -v <volume>:/v/<volume>:ro --entrypoint node <image> -e <script>`).
+It runs as container root because, in rootless Podman, that is the user who owns the volume files (transcripts are mode 600).
 If the Podman machine is stopped the sidebar shows "sandbox offline"; Periscope never starts it.
 
 Environment:
