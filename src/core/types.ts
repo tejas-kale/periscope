@@ -78,3 +78,24 @@ export interface SearchHit {
   event_id: string;
   snippet: string;
 }
+
+export interface SandboxState {
+  state: 'unknown' | 'online' | 'offline' | 'error' | 'disabled';
+  message?: string;
+}
+
+export interface ChangeNotice {
+  sessionIds: string[];
+}
+
+/** What the preload script exposes to the renderer as `window.periscope`. */
+export interface PeriscopeApi {
+  listSessions(f: SessionFilter): Promise<SessionRow[]>;
+  getEvents(sessionId: string, sinceSeq?: number): Promise<EventRow[]>;
+  getRaw(eventId: string): Promise<string | null>;
+  search(q: string, f: SessionFilter): Promise<SearchHit[]>;
+  sandboxStatus(): Promise<SandboxState>;
+  readImage(path: string): Promise<string | null>;
+  onChange(cb: (n: ChangeNotice) => void): () => void;
+  onSandbox(cb: (s: SandboxState) => void): () => void;
+}

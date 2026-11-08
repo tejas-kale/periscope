@@ -1,0 +1,16 @@
+appId: dev.tejaskale.periscope
+productName: Periscope
+directories:
+  output: release
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+asarUnpack:
+  - node_modules/better-sqlite3/**
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+  category: public.app-category.developer-tools
+  identity: null # unsigned (spec: no code signing in v1)

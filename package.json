@@ -18,8 +18,7 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
-    "better-sqlite3": "^12.2.0",
-    "chokidar": "^4.0.3"
+    "better-sqlite3": "^12.2.0"
   },
   "devDependencies": {
     "@tanstack/react-virtual": "^3.13.12",
@@ -28,6 +27,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^5.0.0",
+    "chokidar": "^4.0.3",
     "concurrently": "^9.2.0",
     "cross-env": "^10.0.0",
     "electron": "^38.0.0",
