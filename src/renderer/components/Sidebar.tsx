@@ -122,9 +122,14 @@ export function Sidebar(p: {
     e.preventDefault();
   };
 
-  // ⌥↑ / ⌥↓ from anywhere: previous / next chat.
+  // ⌥↑ / ⌥↓ from anywhere: previous / next chat. Ctrl+1…9: the nth chat from the top of the list as shown.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+        const it = items.filter((x) => x.s)[Number(e.key) - 1];
+        if (it) (e.preventDefault(), moveTo(it));
+        return;
+      }
       if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !isTyping(e)) {
         e.preventDefault();
         step(e.key === 'ArrowDown' ? 1 : -1, true);

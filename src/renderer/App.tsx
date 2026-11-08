@@ -39,7 +39,7 @@ export function App() {
         return;
       }
       if (mod && e.key.toLowerCase() === 'k') (e.preventDefault(), focus('global-search'), (document.getElementById('global-search') as HTMLInputElement | null)?.select());
-      else if (mod && ['1', '2', '3'].includes(e.key)) (e.preventDefault(), focus({ 1: 'session-list', 2: 'trace', 3: 'detail' }[e.key as '1' | '2' | '3']));
+      else if (e.metaKey && !e.ctrlKey && ['1', '2', '3'].includes(e.key)) (e.preventDefault(), focus({ 1: 'session-list', 2: 'trace', 3: 'detail' }[e.key as '1' | '2' | '3']));
       else if (!mod && !e.altKey && !isTyping(e)) {
         if (e.key === '?') (e.preventDefault(), setHelp(true));
         else if (e.key === '/') (e.preventDefault(), focus('global-search'));

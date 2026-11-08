@@ -6,6 +6,7 @@ const GROUPS: [string, [string, string][]][] = [
       ['/  or  ⌘K', 'Search all sessions'],
       ['⌘1 · ⌘2 · ⌘3', 'Focus chats · trace · detail'],
       ['⌥↓ · ⌥↑', 'Next · previous chat'],
+      ['⌃1 … ⌃9', 'Open the 1st … 9th chat in the list'],
       ['Esc', 'Close dialog or find bar'],
     ],
   ],
