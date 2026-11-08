@@ -10,18 +10,20 @@ Branch `agent/claude-20261108-140312`. Spec: [SPEC.md](SPEC.md).
 - Fixtures: redacted real sessions in `test/fixtures/` (`scripts/redact-fixture.mjs`).
 - Smoke run over all 146 transcripts in this container (96 MB): ~0.9 s, no orphaned events.
 
-## Written, never compiled or run
+## Built and launched on the Mac (2026-11-08)
 
-- `src/main/main.ts`, `src/main/preload.ts`, all of `src/renderer/` (React components), `vite.config.ts`,
-  `scripts/build-main.mjs`, `electron-builder.yml`.
+- `npm install`, `npm run typecheck` (clean), `npm test` (27 pass), `npm run build` all succeed.
+- `npx electron .` starts with no errors; native ingest filled the DB (181 sessions, 17k events).
+- Setup gotchas: npm skipped install scripts, so run `npx electron-builder install-app-deps`.
+  `node_modules/electron/install.js` exits silently on Node 26 without extracting; unzip the cached zip
+  (~/Library/Caches/electron) into `node_modules/electron/dist` and write `path.txt`
+  (`Electron.app/Contents/MacOS/Electron`).
 
 ## Next steps
 
-1. User runs `claude-pkg npm install` (container) or `npm install` (Mac). Nothing is installed yet.
-2. `npm run typecheck`; fix errors (known: `role?: string` vs `null` in `src/core/parsers/codex.ts` `mk`).
-3. `npm run build`; check `import.meta.dirname` -> `__dirname` define and the shiki JS regex engine import.
-4. User launches `npm start` on the Mac (no display in the container) and reports what breaks.
-5. `npm run dist` for the dmg; then tick the Slices in SPEC.md.
+1. Eyeball the UI (sidebar, trace tree, detail, Cmd+F, live follow, sandbox source) and fix what breaks.
+2. Shiki bundles every language; restrict to the languages actually used.
+3. `npm run dist` for the dmg; then tick the Slices in SPEC.md.
 
 ## Decisions taken (not in the spec)
 
