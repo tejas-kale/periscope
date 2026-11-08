@@ -79,8 +79,8 @@ export function AgentBadge({ agent }: { agent: Agent }) {
 
 export function HostMarker({ host }: { host: Host }) {
   return (
-    <span className={`host h-${host}`} title={host === 'sandbox' ? 'Ran in the Podman sandbox' : 'Ran on this Mac'}>
-      {host === 'sandbox' ? '▣' : '⌂'}
+    <span className={`badge h-${host}`} title={host === 'sandbox' ? 'Ran in the Podman sandbox' : 'Ran on this Mac'}>
+      {host === 'sandbox' ? 'Sandbox' : 'Mac'}
     </span>
   );
 }

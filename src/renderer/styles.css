@@ -317,11 +317,12 @@ input[type='search'],
 .a-antigravity {
   background: var(--a-antigravity);
 }
-.host {
-  color: var(--muted);
+/* Host tags: neutral slate for the Mac, violet for the sandbox, so they don't read as agent colours. */
+.h-native {
+  background: #64748b;
 }
-.host.h-sandbox {
-  color: var(--accent);
+.h-sandbox {
+  background: #7c3aed;
 }
 .live-dot {
   width: 8px;
