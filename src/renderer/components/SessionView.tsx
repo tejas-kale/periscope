@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { EventRow, SessionRow } from '../../core/types.ts';
 import { api } from '../api.ts';
-import { buildTree, findMatches, flatten, fmtDuration, fmtTokens, hint, mergeEvents, treeOrder, type ShowFilter, type Tree } from '../lib/tree.ts';
+import { buildTree, findMatches, flatten, fmtDuration, fmtTokens, hint, isContext, mergeEvents, treeOrder, visibleId, type ShowFilter, type Tree } from '../lib/tree.ts';
 import { useHighlight } from '../useHighlight.ts';
-import { Detail } from './Detail.tsx';
-import { AgentBadge, HostMarker, KindIcon, LiveDot } from './Icons.tsx';
+import { ContextPanel, Detail } from './Detail.tsx';
+import { AgentBadge, Chevron, HostMarker, KindIcon, LiveDot } from './Icons.tsx';
+import { isTyping } from '../keys.ts';
 
-const ROW_H = 26;
+const ROW_H = 28;
 /** On a live update, re-fetch this many recent events too, to pick up patched durations and tokens. */
 const REFETCH_WINDOW = 200;
 
@@ -74,6 +75,7 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
   const [collapseAll, setCollapseAll] = useState(false);
   const [expanded, setExpanded] = useState<Map<string, boolean>>(new Map());
   const [stats, setStats] = useState(false);
+  const [showContext, setShowContext] = useState(false);
   const [follow, setFollow] = useState(false);
   const [searchOpen, setSearchOpen] = useState(!!initialQuery);
   const [query, setQuery] = useState(initialQuery ?? '');
@@ -117,10 +119,12 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
   const tree = useMemo(() => buildTree(events), [events]);
   const matches = useMemo(() => {
     const m = findMatches(events, searchOpen ? query : '');
-    return { ...m, ids: treeOrder(tree, m.ids) };
+    // A match inside a folded-away row (a tool result) counts as a match on the row that shows it.
+    return { ...m, ids: [...new Set(treeOrder(tree, m.ids).map((id) => visibleId(tree, id)))] };
   }, [events, tree, query, searchOpen]);
   const current = matches.ids.length ? matches.ids[Math.min(matchIdx, matches.ids.length - 1)] : null;
-  const reveal = useMemo(() => [...matches.ids, ...(selected ? [selected] : [])], [matches.ids, selected]);
+  const sel = selected ? visibleId(tree, selected) : null;
+  const reveal = useMemo(() => [...matches.ids, ...(sel ? [sel] : [])], [matches.ids, sel]);
   const rows = useMemo(() => flatten(tree, { show, expanded, collapseAll, reveal }), [tree, show, expanded, collapseAll, reveal]);
   const rowIndex = useMemo(() => new Map(rows.map((r, i) => [r.node.ev.id, i])), [rows]);
   const matchSet = useMemo(() => new Set(matches.ids), [matches.ids]);
@@ -132,11 +136,11 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
     (id: string | null, scroll = true) => {
       setSelected(id);
       if (scroll && id != null) {
-        const i = rowIndex.get(id);
+        const i = rowIndex.get(visibleId(tree, id));
         if (i != null) virt.scrollToIndex(i, { align: 'auto' });
       }
     },
-    [rowIndex, virt],
+    [rowIndex, virt, tree],
   );
 
   // Jump to the current search match.
@@ -147,8 +151,8 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
 
   // Keep the selected row in view once the tree has rows for it (e.g. after opening from a search hit).
   useEffect(() => {
-    if (selected && rowIndex.has(selected)) virt.scrollToIndex(rowIndex.get(selected)!, { align: 'auto' });
-  }, [selected && rowIndex.has(selected)]);
+    if (sel && rowIndex.has(sel)) virt.scrollToIndex(rowIndex.get(sel)!, { align: 'auto' });
+  }, [sel && rowIndex.has(sel)]);
 
   // Follow: stick to the newest event.
   useEffect(() => {
@@ -165,15 +169,27 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
     setMatchIdx((i) => (i + d + matches.ids.length) % matches.ids.length);
   };
 
+  const contextEvents = useMemo(() => events.filter((e) => isContext(e)), [events]);
+  const toggleCollapseAll = () => (setCollapseAll(!collapseAll), setExpanded(new Map()));
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         setSearchOpen(true);
         setTimeout(() => searchRef.current?.select(), 0);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g') {
+      } else if (mod && e.key.toLowerCase() === 'g') {
         e.preventDefault();
         step(e.shiftKey ? -1 : 1);
+      } else if (!mod && !e.altKey && !isTyping(e)) {
+        const k = e.key;
+        if (k === 'c') toggleCollapseAll();
+        else if (k === 's') setStats((v) => !v);
+        else if (k === 'f') setFollow((v) => !v);
+        else if (k === 'i') setShowContext((v) => !v);
+        else return;
+        e.preventDefault();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -181,25 +197,41 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
   });
 
   const onTreeKey = (e: React.KeyboardEvent) => {
-    const i = selected ? rowIndex.get(selected) : undefined;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const next = i == null ? 0 : Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
-      if (rows[next]) select(rows[next].node.ev.id);
-    } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && i != null) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const i = sel ? rowIndex.get(sel) : undefined;
+    const k = { j: 'ArrowDown', k: 'ArrowUp', h: 'ArrowLeft', l: 'ArrowRight' }[e.key] ?? e.key;
+    const go = (n: number) => rows[n] && select(rows[n].node.ev.id);
+    if (k === 'ArrowDown' || k === 'ArrowUp') go(i == null ? 0 : Math.max(0, Math.min(rows.length - 1, i + (k === 'ArrowDown' ? 1 : -1))));
+    else if (k === 'g') go(0);
+    else if (k === 'G') go(rows.length - 1);
+    else if (k === 'PageDown' || k === 'PageUp') go(Math.max(0, Math.min(rows.length - 1, (i ?? 0) + (k === 'PageDown' ? 20 : -20))));
+    else if (k === ' ' && i != null) rows[i].hasChildren && toggle(rows[i].node.ev.id, rows[i].expanded);
+    else if (k === 'Enter') document.getElementById('detail')?.focus();
+    else if ((k === 'ArrowLeft' || k === 'ArrowRight') && i != null) {
       const r = rows[i];
-      if (r.node.children.length && r.expanded === (e.key === 'ArrowLeft')) toggle(r.node.ev.id, r.expanded);
-      else if (e.key === 'ArrowLeft' && r.node.parent) select(r.node.parent.ev.id);
-    }
+      if (r.hasChildren && r.expanded === (k === 'ArrowLeft')) toggle(r.node.ev.id, r.expanded);
+      else if (k === 'ArrowLeft' && r.node.parent) select(visibleId(tree, r.node.parent.ev.id));
+    } else return;
+    e.preventDefault();
+  };
+
+  const onDetailKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const el = e.currentTarget;
+    if (e.key === 'j') el.scrollBy({ top: 80 });
+    else if (e.key === 'k') el.scrollBy({ top: -80 });
+    else if (e.key === 'Escape' || e.key === 'h') document.getElementById('trace')?.focus();
+    else return;
+    e.preventDefault();
   };
 
   const treeRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const hq = searchOpen ? query : '';
   useHighlight(treeRef, 'search-tree', hq, [rows, virt.getVirtualItems().length]);
-  useHighlight(detailRef, 'search-detail', hq, [selected, events]);
+  useHighlight(detailRef, 'search-detail', hq, [sel, events]);
 
-  const selNode = selected ? tree.byId.get(selected) ?? null : null;
+  const selNode = sel ? tree.byId.get(sel) ?? null : null;
 
   return (
     <section className="session-view">
@@ -223,13 +255,18 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
               <option value="text">Model text</option>
             </select>
           </label>
-          <button className={collapseAll ? 'on' : ''} onClick={() => (setCollapseAll(!collapseAll), setExpanded(new Map()))}>
+          <button className={collapseAll ? 'on' : ''} onClick={toggleCollapseAll} title="Collapse all (C)">
             Collapse
           </button>
-          <button className={stats ? 'on' : ''} onClick={() => setStats(!stats)}>
+          <button className={stats ? 'on' : ''} onClick={() => setStats(!stats)} title="Stats (S)">
             Stats
           </button>
-          <button className={follow ? 'on' : ''} onClick={() => setFollow(!follow)} title="Stick to the newest event">
+          {contextEvents.length > 0 && (
+            <button className={showContext ? 'on' : ''} onClick={() => setShowContext(!showContext)} title="What Claude Code added to the model's context: environment, date, model, hooks, listings (I)">
+              Context
+            </button>
+          )}
+          <button className={follow ? 'on' : ''} onClick={() => setFollow(!follow)} title="Stick to the newest event (F)">
             Follow
           </button>
           <button onClick={() => (setSearchOpen(true), setTimeout(() => searchRef.current?.select(), 0))} title="Find in session (⌘F)">
@@ -262,9 +299,10 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
           </div>
         )}
         {stats && <Stats tree={tree} events={events} />}
+        {showContext && <ContextPanel events={contextEvents} />}
       </header>
       <div className="sv-body">
-        <div className="tree" ref={parentRef} tabIndex={0} onKeyDown={onTreeKey}>
+        <div className="tree" id="trace" ref={parentRef} tabIndex={0} onKeyDown={onTreeKey}>
           <div ref={treeRef} style={{ height: virt.getTotalSize(), position: 'relative' }}>
             {virt.getVirtualItems().map((vi) => {
               const r = rows[vi.index];
@@ -272,19 +310,25 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
               return (
                 <div
                   key={ev.id}
-                  className={`row k-${ev.kind} ${ev.id === selected ? 'sel' : ''} ${matchSet.has(ev.id) ? 'match' : ''}`}
+                  className={`row k-${ev.kind} ${ev.id === sel ? 'sel' : ''} ${matchSet.has(ev.id) ? 'match' : ''} ${r.node.failed ? 'failed' : ''}`}
                   style={{ transform: `translateY(${vi.start}px)`, height: ROW_H, paddingLeft: 8 + r.depth * 16 }}
                   onClick={() => select(ev.id, false)}
                 >
-                  <span
-                    className={`twisty ${r.node.children.length ? '' : 'none'}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (r.node.children.length) toggle(ev.id, r.expanded);
-                    }}
-                  >
-                    {r.node.children.length ? (r.expanded ? '▾' : '▸') : ''}
-                  </span>
+                  {r.hasChildren ? (
+                    <button
+                      className="twisty"
+                      tabIndex={-1}
+                      title={r.expanded ? 'Collapse (← or Space)' : 'Expand (→ or Space)'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggle(ev.id, r.expanded);
+                      }}
+                    >
+                      <Chevron open={r.expanded} />
+                    </button>
+                  ) : (
+                    <span className="twisty none" />
+                  )}
                   <KindIcon kind={ev.kind} />
                   {ev.kind === 'tool_call' && <span className="tool-name">{ev.tool_name}</span>}
                   <span className="hint">{hint(ev)}</span>
@@ -298,7 +342,7 @@ export function SessionView({ session, focusEvent, initialQuery, changeTick }: {
           </div>
           {events.length === 0 && <div className="empty">Loading…</div>}
         </div>
-        <div className="detail-wrap" ref={detailRef}>
+        <div className="detail-wrap" id="detail" ref={detailRef} tabIndex={0} onKeyDown={onDetailKey}>
           <Detail node={selNode} />
         </div>
       </div>

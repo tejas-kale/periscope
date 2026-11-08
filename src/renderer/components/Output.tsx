@@ -4,6 +4,8 @@ import { looksLikeDiff, parseUnified } from '../lib/diff.ts';
 import { CodeBlock } from './CodeBlock.tsx';
 import { CopyButton } from './CopyButton.tsx';
 import { DiffView } from './DiffView.tsx';
+import { Markdown } from './Markdown.tsx';
+import { looksLikeMarkdown } from '../lib/markdown.ts';
 
 const COLLAPSE_LINES = 40;
 
@@ -29,6 +31,8 @@ function AnsiPre({ text }: { text: string }) {
 /** Tool output: diffs coloured, JSON pretty-printed, shell output monospaced with ANSI colours, long output collapsed. */
 export function Output({ text, forceOpen }: { text: string; forceOpen?: boolean }) {
   const [open, setOpen] = useState(false);
+  const [raw, setRaw] = useState(false);
+  const md = useMemo(() => looksLikeMarkdown(text), [text]);
   const lines = useMemo(() => text.split('\n'), [text]);
   const json = useMemo(() => {
     const t = text.trim();
@@ -45,11 +49,17 @@ export function Output({ text, forceOpen }: { text: string; forceOpen?: boolean 
   let body;
   if (json) body = <CodeBlock code={long ? json.split('\n').slice(0, COLLAPSE_LINES).join('\n') : json} lang="json" showCopy={false} />;
   else if (looksLikeDiff(text)) body = <DiffView lines={parseUnified(shown)} />;
+  else if (md && !raw) body = <div className="out-md"><Markdown text={shown} /></div>;
   else if (hasAnsi(text)) body = <AnsiPre text={shown} />;
   else body = <pre className="out">{shown}</pre>;
   return (
     <div className="output">
       <CopyButton text={json ?? text} />
+      {md && !json && (
+        <button className="raw-toggle" onClick={() => setRaw(!raw)} title="Switch between rendered Markdown and the raw text">
+          {raw ? 'Rendered' : 'Raw'}
+        </button>
+      )}
       {body}
       {lines.length > COLLAPSE_LINES && !forceOpen && (
         <button className="expand" onClick={() => setOpen(!open)}>

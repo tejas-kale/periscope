@@ -19,6 +19,14 @@ Branch `agent/claude-20261108-140312`. Spec: [SPEC.md](SPEC.md).
   (~/Library/Caches/electron) into `node_modules/electron/dist` and write `path.txt`
   (`Electron.app/Contents/MacOS/Electron`).
 
+## UI pass 1 (2026-11-08, not yet run on the Mac)
+
+Results fold into their tool call; noise rows hidden (empty thinking, injected context, /exit, caveats, bare
+system subtypes); injected context moved to a Context panel (`i`); Codex exec shown as its shell command; code
+and output wrap; Markdown output rendered (Raw toggle); SVG kind icons and a bigger chevron; keyboard
+shortcuts with a `?` modal; sidebar: top 3 projects open, 4 chats each plus "Show 4 more"; sandbox badge
+click shows the Podman error.
+
 ## Next steps
 
 1. Eyeball the UI (sidebar, trace tree, detail, Cmd+F, live follow, sandbox source) and fix what breaks.

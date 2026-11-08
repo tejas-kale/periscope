@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { EventRow } from '../../core/types.ts';
 import { lineDiff, looksLikeDiff, parseUnified } from '../lib/diff.ts';
-import { fmtDuration, fmtTokens, type TreeNode } from '../lib/tree.ts';
+import { attachmentType, cleanUserText, execCommand, fmtDuration, fmtTokens, type TreeNode } from '../lib/tree.ts';
 import { api } from '../api.ts';
 import { CodeBlock, langForPath } from './CodeBlock.tsx';
 import { DiffView } from './DiffView.tsx';
@@ -67,6 +67,8 @@ export function ToolArgs({ ev }: { ev: EventRow }) {
     return <CodeBlock code={JSON.stringify(a, null, 2)} lang="json" />;
   }
   if (looksLikeDiff(ev.text)) return <DiffView lines={parseUnified(ev.text)} copy={ev.text} />;
+  const cmd = execCommand(ev.text);
+  if (cmd != null) return <CodeBlock code={cmd} lang="bash" />;
   if (tool === 'exec' || tool === 'js') return <CodeBlock code={ev.text} lang="javascript" />;
   return <CodeBlock code={ev.text} lang={tool === 'shell' ? 'bash' : null} />;
 }
@@ -125,11 +127,14 @@ function RawJson({ id }: { id: string }) {
 function Body({ node }: { node: TreeNode }) {
   const ev = node.ev;
   switch (ev.kind) {
-    case 'turn':
+    case 'turn': {
+      const c = cleanUserText(ev.text);
+      return c.text !== ev.text ? <Output text={c.text} /> : <Markdown text={ev.text} />;
+    }
     case 'text':
       return <Markdown text={ev.text} />;
     case 'reasoning':
-      return ev.text.trim() ? <div className="reasoning"><Markdown text={ev.text} /></div> : <div className="empty">The model's thinking was not recorded in the transcript.</div>;
+      return <div className="reasoning"><Markdown text={ev.text} /></div>;
     case 'tool_call': {
       const results = node.children.filter((c) => c.ev.kind === 'tool_result' || c.ev.kind === 'error');
       return (
@@ -150,8 +155,68 @@ function Body({ node }: { node: TreeNode }) {
     case 'error':
       return <Output text={ev.text} />;
     default:
-      return <Output text={ev.text} />;
+      return <Output text={cleanUserText(ev.text).text} />;
   }
+}
+
+const pretty = (k: string) => k.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase());
+
+/** One attachment's fields as a key/value list; long or nested values as blocks. */
+function Fields({ obj }: { obj: Record<string, unknown> }) {
+  const entries = Object.entries(obj).filter(([k, v]) => k !== 'type' && k !== 'toolUseID' && v !== '' && v != null && !(Array.isArray(v) && !v.length));
+  if (!entries.length) return null;
+  return (
+    <dl className="fields">
+      {entries.map(([k, v]) => {
+        const flat = typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+        const short = flat && String(v).length < 120 && !String(v).includes('\n');
+        return (
+          <div key={k} className={short ? 'f-row' : 'f-block'}>
+            <dt>{pretty(k)}</dt>
+            <dd>
+              {short ? <code>{String(v)}</code> : flat ? <Output text={String(v)} /> : v && typeof v === 'object' && !Array.isArray(v) ? <Fields obj={v as Record<string, unknown>} /> : <Output text={JSON.stringify(v, null, 2)} />}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
+  );
+}
+
+function ContextItem({ ev }: { ev: EventRow }) {
+  const [att, setAtt] = useState<Record<string, unknown> | null | undefined>(undefined);
+  const type = attachmentType(ev) ?? 'attachment';
+  return (
+    <details className="ctx-item" onToggle={(e) => (e.currentTarget.open && att === undefined ? void api().getRaw(ev.id).then((r) => setAtt(r ? (JSON.parse(r).attachment ?? null) : null)) : undefined)}>
+      <summary>
+        <span>{pretty(type)}</span>
+        {ev.ts != null && <time>{new Date(ev.ts).toLocaleTimeString()}</time>}
+      </summary>
+      {att === undefined ? <div className="empty">Loading…</div> : att ? <Fields obj={att} /> : <Output text={ev.text} />}
+    </details>
+  );
+}
+
+/** What Claude Code put into the model's context besides the conversation: environment, date, model, hook output, tool and skill listings. */
+export function ContextPanel({ events }: { events: EventRow[] }) {
+  // Repeated snapshots (one per turn) mostly carry the same values; show each type's latest first.
+  const latest = new Map<string, EventRow[]>();
+  for (const e of [...events].reverse()) {
+    const t = attachmentType(e) ?? '';
+    if (!latest.has(t)) latest.set(t, []);
+    latest.get(t)!.push(e);
+  }
+  return (
+    <div className="ctx">
+      <p className="muted">Injected by Claude Code into the model's context. Not part of the conversation. Latest of each kind; open one to see its fields.</p>
+      {[...latest.entries()].map(([t, list]) => (
+        <div key={t} className="ctx-group">
+          <ContextItem ev={list[0]} />
+          {list.length > 1 && <span className="ctx-count">×{list.length}</span>}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function Images({ ev }: { ev: EventRow }) {
@@ -167,7 +232,7 @@ function Images({ ev }: { ev: EventRow }) {
 
 function label(ev: EventRow): string {
   if (ev.kind === 'tool_call') return ev.tool_name ?? 'tool call';
-  if (ev.kind === 'turn') return 'User prompt';
+  if (ev.kind === 'turn') return /^<(command-name|command-message)>/.test(ev.text.trim()) ? 'Slash command' : ev.text.trim().startsWith('<bash-') ? 'Shell (!)' : 'User prompt';
   if (ev.kind === 'tool_result') return 'Tool result';
   return { reasoning: 'Reasoning', text: 'Model text', error: 'Error', meta: ev.role ? `Meta · ${ev.role}` : 'Meta' }[ev.kind] ?? ev.kind;
 }

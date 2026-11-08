@@ -9,6 +9,8 @@ export interface TreeNode {
   /** Tokens summed over the node and its descendants. */
   tokensIn: number;
   tokensOut: number;
+  /** A tool call with an error result. */
+  failed: boolean;
 }
 
 export interface Tree {
@@ -19,7 +21,7 @@ export interface Tree {
 export function buildTree(events: EventRow[]): Tree {
   const byId = new Map<string, TreeNode>();
   const sorted = [...events].sort((a, b) => a.seq - b.seq);
-  for (const ev of sorted) byId.set(ev.id, { ev, parent: null, children: [], duration: ev.duration_ms, tokensIn: 0, tokensOut: 0 });
+  for (const ev of sorted) byId.set(ev.id, { ev, parent: null, children: [], duration: ev.duration_ms, tokensIn: 0, tokensOut: 0, failed: false });
   const roots: TreeNode[] = [];
   for (const ev of sorted) {
     const n = byId.get(ev.id)!;
@@ -43,6 +45,7 @@ export function buildTree(events: EventRow[]): Tree {
     return end != null && lastTs != null ? Math.max(end, lastTs) : (end ?? lastTs);
   };
   roots.forEach(agg);
+  for (const n of byId.values()) if (n.ev.kind === 'tool_call') n.failed = n.children.some((c) => c.ev.kind === 'error');
   return { roots, byId };
 }
 
@@ -58,6 +61,72 @@ export interface Row {
   node: TreeNode;
   depth: number;
   expanded: boolean;
+  /** Has children that are shown in the tree (hidden ones do not count). */
+  hasChildren: boolean;
+}
+
+// ---- noise: rows the tree leaves out ----
+
+const KEEP_ATTACHMENTS = new Set(['queued_command']);
+
+/** Attachment type of a Claude attachment meta event (the first line of its text). */
+export const attachmentType = (ev: EventRow) => (ev.kind === 'meta' && ev.role === 'attachment' ? ev.text.split('\n')[0] : null);
+
+/** Context Claude Code injected for the model (environment, date, hooks, listings): shown in the Context panel, not the trace. */
+export function isContext(ev: EventRow): boolean {
+  const t = attachmentType(ev);
+  return t != null && !KEEP_ATTACHMENTS.has(t) && !/error|block|denied/.test(t);
+}
+
+const tag = (text: string, name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text)?.[1];
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+const QUIT = new Set(['/exit', '/quit']);
+const BYE = /^(goodbye|bye|see ya|catch you later)[!.]*$/i;
+
+/** Claude Code wraps slash commands, `!` shell input and local output in XML tags; return readable text, or hidden. */
+export function cleanUserText(text: string): { text: string; hidden: boolean } {
+  const t = text.trim();
+  if (!t.startsWith('<')) return { text, hidden: false };
+  if (t.includes('<local-command-caveat>')) return { text: '', hidden: true };
+  const name = tag(t, 'command-name');
+  if (name != null) {
+    const out = `${name.trim()} ${(tag(t, 'command-args') ?? '').trim()}`.trim();
+    return { text: out, hidden: QUIT.has(name.trim()) };
+  }
+  const stdout = tag(t, 'local-command-stdout');
+  if (stdout != null) {
+    const out = stripAnsi(stdout).trim();
+    return { text: out, hidden: !out || BYE.test(out) };
+  }
+  const bash = tag(t, 'bash-input');
+  if (bash != null) return { text: `! ${bash.trim()}`, hidden: false };
+  const bout = tag(t, 'bash-stdout');
+  const berr = tag(t, 'bash-stderr');
+  if (bout != null || berr != null) {
+    const out = [bout, berr].map((x) => stripAnsi(x ?? '').trim()).filter(Boolean).join('\n');
+    return { text: out, hidden: !out };
+  }
+  const summary = tag(t, 'summary');
+  if (t.startsWith('<task-notification>') && summary != null) return { text: `Background task: ${summary.trim()}`, hidden: false };
+  return { text, hidden: false };
+}
+
+/** A row the trace leaves out: results (shown with their tool call), empty thinking, injected context, bookkeeping. */
+export function isNoise(n: TreeNode): boolean {
+  const ev = n.ev;
+  if ((ev.kind === 'tool_result' || ev.kind === 'error') && n.parent?.ev.kind === 'tool_call') return true;
+  if (ev.kind === 'reasoning' && !ev.text.trim()) return true;
+  if (isContext(ev)) return true;
+  if (ev.kind === 'meta' && ev.role === 'system' && /^[a-z_]+$/.test(ev.text.trim())) return true; // bare subtype: turn_duration, stop_hook_summary
+  if ((ev.kind === 'turn' || ev.kind === 'meta') && cleanUserText(ev.text).hidden) return true;
+  return false;
+}
+
+/** The nearest node at or above `id` that the trace shows. */
+export function visibleId(tree: Tree, id: string): string {
+  let n = tree.byId.get(id);
+  while (n && n.parent && isNoise(n)) n = n.parent;
+  return n?.ev.id ?? id;
 }
 
 export interface FlattenOptions {
@@ -71,7 +140,14 @@ export interface FlattenOptions {
 
 export function flatten(tree: Tree, o: FlattenOptions): Row[] {
   const forced = new Set<string>();
-  for (const id of o.reveal ?? []) for (let p = tree.byId.get(id)?.parent; p; p = p.parent) forced.add(p.ev.id);
+  for (const id of o.reveal ?? []) for (let p = tree.byId.get(visibleId(tree, id))?.parent; p; p = p.parent) forced.add(p.ev.id);
+  // A node is shown unless it is noise with nothing shown beneath it.
+  const shown = new Map<TreeNode, boolean>();
+  const isShown = (n: TreeNode): boolean => {
+    let v = shown.get(n);
+    if (v === undefined) shown.set(n, (v = !isNoise(n) || n.children.some(isShown)));
+    return v;
+  };
   let keep: Set<string> | null = null;
   if (o.show !== 'all') {
     const kinds = SHOW_KINDS[o.show];
@@ -85,10 +161,11 @@ export function flatten(tree: Tree, o: FlattenOptions): Row[] {
   const rows: Row[] = [];
   const walk = (nodes: TreeNode[], depth: number) => {
     for (const n of nodes) {
-      if (keep && !keep.has(n.ev.id)) continue;
+      if ((keep && !keep.has(n.ev.id)) || !isShown(n)) continue;
+      const hasChildren = n.children.some((c) => isShown(c) && (!keep || keep.has(c.ev.id)));
       const explicit = o.expanded.get(n.ev.id);
-      const expanded = n.children.length > 0 && (forced.has(n.ev.id) || (explicit ?? (!o.collapseAll || keep !== null)));
-      rows.push({ node: n, depth, expanded });
+      const expanded = hasChildren && (forced.has(n.ev.id) || (explicit ?? (!o.collapseAll || keep !== null)));
+      rows.push({ node: n, depth, expanded, hasChildren });
       if (expanded) walk(n.children, depth + 1);
     }
   };
@@ -126,8 +203,21 @@ const firstLine = (s: string, max = 140) => {
 };
 
 /** One-line summary of an event for the tree. */
+/** The shell command inside a Codex `exec` call (`text(await tools.exec_command({cmd:"..."}))`), unescaped. */
+export function execCommand(text: string): string | null {
+  const m = /exec_command\(\s*\{\s*"?cmd"?\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+}
+
 export function hint(ev: EventRow): string {
   if (ev.kind === 'tool_call') {
+    const cmd = execCommand(ev.text);
+    if (cmd != null) return firstLine(cmd);
     try {
       const a = JSON.parse(ev.text);
       if (a && typeof a === 'object') {
@@ -139,7 +229,8 @@ export function hint(ev: EventRow): string {
       /* not JSON: freeform input such as a patch or script */
     }
   }
-  if (ev.kind === 'reasoning' && !ev.text.trim()) return '(thinking not recorded)';
+  if (attachmentType(ev)) return firstLine(ev.text.split('\n').slice(1).join('\n')) || attachmentType(ev)!.replace(/_/g, ' ');
+  if (ev.kind === 'turn' || ev.kind === 'meta') return firstLine(cleanUserText(ev.text).text) || `(${ev.kind})`;
   return firstLine(ev.text) || `(${ev.kind})`;
 }
 

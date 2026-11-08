@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseAnsi } from '../src/renderer/lib/ansi.ts';
 import { lineDiff, looksLikeDiff, parseUnified } from '../src/renderer/lib/diff.ts';
-import { buildTree, findMatches, flatten, hint, mergeEvents, fmtDuration } from '../src/renderer/lib/tree.ts';
+import { buildTree, cleanUserText, execCommand, findMatches, flatten, hint, isContext, mergeEvents, fmtDuration, visibleId } from '../src/renderer/lib/tree.ts';
+import { looksLikeMarkdown } from '../src/renderer/lib/markdown.ts';
 import type { EventRow } from '../src/core/types.ts';
 
 test('ansi: colours, bold, reset and dropped cursor codes', () => {
@@ -55,10 +56,10 @@ test('tree: nesting, aggregated tokens and turn duration', () => {
 test('tree: show filter keeps matches and ancestors; collapse; reveal opens ancestors', () => {
   const t = buildTree(EVS);
   const ids = (rows: ReturnType<typeof flatten>) => rows.map((r) => r.node.ev.id);
-  assert.deepEqual(ids(flatten(t, { show: 'all', expanded: new Map(), collapseAll: false })), ['t1', 'r1', 'c1', 'o1', 'x1', 't2', 'm2']);
-  assert.deepEqual(ids(flatten(t, { show: 'errors', expanded: new Map(), collapseAll: true })), ['t1', 'c1', 'o1']);
+  assert.deepEqual(ids(flatten(t, { show: 'all', expanded: new Map(), collapseAll: false })), ['t1', 'r1', 'c1', 'x1', 't2', 'm2']);
+  assert.deepEqual(ids(flatten(t, { show: 'errors', expanded: new Map(), collapseAll: true })), ['t1', 'c1']);
   assert.deepEqual(ids(flatten(t, { show: 'all', expanded: new Map(), collapseAll: true })), ['t1', 't2']);
-  assert.deepEqual(ids(flatten(t, { show: 'all', expanded: new Map(), collapseAll: true, reveal: ['o1'] })), ['t1', 'r1', 'c1', 'o1', 'x1', 't2']);
+  assert.deepEqual(ids(flatten(t, { show: 'all', expanded: new Map(), collapseAll: true, reveal: ['o1'] })), ['t1', 'r1', 'c1', 'x1', 't2']);
   assert.deepEqual(ids(flatten(t, { show: 'all', expanded: new Map([['t1', false]]), collapseAll: false })), ['t1', 't2', 'm2']);
 });
 
@@ -71,4 +72,47 @@ test('mergeEvents replaces by id and appends new', () => {
   const m = mergeEvents(EVS.slice(0, 2), [ev('r1', 't1', 'reasoning', 1, { tokens_out: 9 }), ev('n', null, 'turn', 9)]);
   assert.deepEqual(m.map((e) => [e.id, e.tokens_out]), [['t1', null], ['r1', 9], ['n', null]]);
   assert.equal(fmtDuration(65_000), '1m5s');
+});
+
+test('tree: noise rows are hidden; results fold into their call; a hidden match maps to its call', () => {
+  const t = buildTree([
+    ...EVS,
+    ev('r0', 't2', 'reasoning', 7, { text: '' }),
+    ev('a1', 't2', 'meta', 8, { role: 'attachment', text: 'environment' }),
+    ev('a2', 't2', 'meta', 9, { role: 'attachment', text: 'queued_command\nlater' }),
+    ev('s1', 't2', 'meta', 10, { role: 'system', text: 'turn_duration' }),
+    ev('t3', null, 'turn', 11, { text: '<command-name>/exit</command-name>\n<command-message>exit</command-message>' }),
+  ]);
+  const rows = flatten(t, { show: 'all', expanded: new Map(), collapseAll: false });
+  assert.deepEqual(rows.map((r) => r.node.ev.id), ['t1', 'r1', 'c1', 'x1', 't2', 'm2', 'a2']);
+  assert.equal(rows.find((r) => r.node.ev.id === 'c1')!.hasChildren, false);
+  assert.ok(t.byId.get('c1')!.failed);
+  assert.equal(visibleId(t, 'o1'), 'c1');
+  assert.ok(isContext(t.byId.get('a1')!.ev) && !isContext(t.byId.get('a2')!.ev));
+  assert.equal(hint(t.byId.get('a2')!.ev), 'later');
+});
+
+test('cleanUserText: slash commands, local output, ! shell, caveats', () => {
+  assert.deepEqual(cleanUserText('<command-message>grill-me</command-message>\n<command-name>/grill-me</command-name>\n<command-args>plan X</command-args>'), { text: '/grill-me plan X', hidden: false });
+  assert.equal(cleanUserText('<command-name>/exit</command-name>').hidden, true);
+  assert.deepEqual(cleanUserText('<local-command-stdout>Goodbye!</local-command-stdout>'), { text: 'Goodbye!', hidden: true });
+  assert.deepEqual(cleanUserText('<local-command-stdout>Set model to \x1b[1mSonnet\x1b[22m</local-command-stdout>'), { text: 'Set model to Sonnet', hidden: false });
+  assert.equal(cleanUserText('<local-command-caveat>Caveat: ...</local-command-caveat>').hidden, true);
+  assert.deepEqual(cleanUserText('<bash-input>git status</bash-input>'), { text: '! git status', hidden: false });
+  assert.deepEqual(cleanUserText('<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>'), { text: 'ok', hidden: false });
+  assert.deepEqual(cleanUserText('plain prompt'), { text: 'plain prompt', hidden: false });
+});
+
+test('execCommand: Codex exec wrapper yields the shell command', () => {
+  const text = 'text(await tools.exec_command({cmd:"cat >> a.py <<\'PY\'\\n\\ndef f():\\n    return \\"x\\"\\nPY", yield_time_ms: 1000}))';
+  assert.equal(execCommand(text), 'cat >> a.py <<\'PY\'\n\ndef f():\n    return "x"\nPY');
+  assert.equal(hint(ev('e', null, 'tool_call', 0, { tool_name: 'exec', text })), "cat >> a.py <<'PY'");
+  assert.equal(execCommand('console.log(1)'), null);
+});
+
+test('looksLikeMarkdown: handoff notes yes, code and numbered output no', () => {
+  assert.ok(looksLikeMarkdown('# Handoff\n\n**Status:** built\n\n## Goal\nExtend it.'));
+  assert.ok(!looksLikeMarkdown('def f():\n    return 1\n'));
+  assert.ok(!looksLikeMarkdown('     1\t# Title\n     2\t**b**\n     3\t- x'));
+  assert.ok(!looksLikeMarkdown('total 8\n-rw-r--r-- 1 a b 0 x'));
 });
