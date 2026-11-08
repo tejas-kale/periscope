@@ -15,7 +15,8 @@
     "dev": "npm run build:main && concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env PERISCOPE_DEV_URL=http://localhost:5173 electron .\"",
     "start": "npm run build && electron .",
     "dist": "npm run build && electron-builder --mac dmg",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "icon": "python3 scripts/make-icon.py"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0"

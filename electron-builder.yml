@@ -2,6 +2,7 @@ appId: dev.tejaskale.periscope
 productName: Periscope
 directories:
   output: release
+  buildResources: build
 files:
   - dist/**
   - dist-electron/**
@@ -9,6 +10,7 @@ files:
 asarUnpack:
   - node_modules/better-sqlite3/**
 mac:
+  icon: build/icon.png
   target:
     - target: dmg
       arch: [arm64]

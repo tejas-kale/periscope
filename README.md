@@ -11,6 +11,7 @@ npm start            # build and launch
 npm run dev          # Vite dev server with reload for the renderer
 npm run dist         # unsigned dmg in release/
 npm test             # core tests, plain Node (no Electron needed)
+npm run icon         # re-render build/icon.png (Python 3 + Pillow)
 ```
 
 First launch indexes every transcript it finds; ~100 MB of transcripts takes about a second.

@@ -165,6 +165,9 @@ function createWindow() {
 
 app.whenReady().then(() => {
   lockDown();
+  // Packaged builds get the icon from the bundle; `npm start` / `npm run dev` need it set on the dock.
+  const icon = path.join(import.meta.dirname, '..', 'build', 'icon.png');
+  if (process.platform === 'darwin' && !app.isPackaged && fs.existsSync(icon)) app.dock?.setIcon(icon);
   const store = openStore();
   const ingestor = new Ingestor(store);
   registerIpc(store);
