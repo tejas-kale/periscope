@@ -904,3 +904,10 @@ kbd {
   flex: 1;
   min-width: 0;
 }
+.ctrl-hint {
+  flex: none;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  font-weight: 600;
+}

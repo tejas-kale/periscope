@@ -25,10 +25,11 @@ function Snippet({ text }: { text: string }) {
   );
 }
 
-function SessionItem({ s, active, cursor, onClick, children }: { s: SessionRow; active: boolean; cursor: boolean; onClick: () => void; children?: React.ReactNode }) {
+function SessionItem({ s, active, cursor, hint, onClick, children }: { s: SessionRow; active: boolean; cursor: boolean; hint?: number; onClick: () => void; children?: React.ReactNode }) {
   return (
     <li className={`session ${active ? 'active' : ''} ${cursor ? 'cursor' : ''}`} data-key={`s:${s.id}`} onClick={onClick} title={s.cwd ?? s.source_path}>
       <div className="session-line">
+        {hint != null && <kbd className="ctrl-hint">⌃{hint}</kbd>}
         <LiveDot status={s.status} />
         <span className="session-title">{s.title || s.id}</span>
         <span className="session-time">{relTime(s.updated_at)}</span>
@@ -121,6 +122,26 @@ export function Sidebar(p: {
     else return;
     e.preventDefault();
   };
+
+  // Holding Ctrl for a second labels the chats Ctrl+1…9 would open; releasing it (or any other key) hides them.
+  const [hints, setHints] = useState(false);
+  const hintNo = useMemo(() => new Map(items.filter((x) => x.s).slice(0, 9).map((x, i) => [x.key, i + 1])), [items]);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const cancel = () => (timer && clearTimeout(timer), (timer = null));
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'Control' && !e.metaKey && !e.altKey && !e.shiftKey) {
+        if (!e.repeat && !timer) timer = setTimeout(() => setHints(true), 1000);
+      } else if (!(e.ctrlKey && /^[1-9]$/.test(e.key))) (cancel(), setHints(false));
+    };
+    const up = (e: KeyboardEvent) => e.key === 'Control' && (cancel(), setHints(false));
+    const blur = () => (cancel(), setHints(false));
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    return () => (cancel(), window.removeEventListener('keydown', down), window.removeEventListener('keyup', up), window.removeEventListener('blur', blur));
+  }, []);
+  const hintFor = (id: string) => (hints ? hintNo.get(`s:${id}`) : undefined);
 
   // ⌥↑ / ⌥↓ from anywhere: previous / next chat. Ctrl+1…9: the nth chat from the top of the list as shown.
   useEffect(() => {
@@ -217,7 +238,7 @@ export function Sidebar(p: {
             {p.hits.map((h) => {
               const s = byId.get(h.session_id);
               return s ? (
-                <SessionItem key={h.session_id} s={s} active={p.selected === s.id} cursor={cur === `s:${s.id}`} onClick={() => (setCursor(`s:${s.id}`), p.onSelect(s.id, h.event_id))}>
+                <SessionItem key={h.session_id} s={s} active={p.selected === s.id} cursor={cur === `s:${s.id}`} hint={hintFor(s.id)} onClick={() => (setCursor(`s:${s.id}`), p.onSelect(s.id, h.event_id))}>
                   <Snippet text={h.snippet} />
                 </SessionItem>
               ) : null;
@@ -237,7 +258,7 @@ export function Sidebar(p: {
                 {open && (
                   <ul>
                     {list.slice(0, limit).map((s) => (
-                      <SessionItem key={s.id} s={s} active={p.selected === s.id} cursor={cur === `s:${s.id}`} onClick={() => (setCursor(`s:${s.id}`), p.onSelect(s.id))} />
+                      <SessionItem key={s.id} s={s} active={p.selected === s.id} cursor={cur === `s:${s.id}`} hint={hintFor(s.id)} onClick={() => (setCursor(`s:${s.id}`), p.onSelect(s.id))} />
                     ))}
                     {(list.length > limit || limit > PAGE) && (
                       <li className="more">
