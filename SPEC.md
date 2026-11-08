@@ -1,4 +1,4 @@
-# agent-observer: spec
+# Periscope: spec
 
 An Electron app (macOS only) to browse, search and watch live the transcripts of Claude Code, Codex and Antigravity CLI sessions, including those run in the Podman sandbox from `tejas-kale/config`.
 
