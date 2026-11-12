@@ -106,3 +106,52 @@ test('trace view-model: windowing slices visible rows and append preserves selec
   assert.equal(state.scrollOffset, 6);
   assert.equal(getVisibleRows(state).length, 55);
 });
+
+test('trace view-model: follow mode tracks newest step, disables on upward move/scroll, re-enables on f or last row', () => {
+  const events: EventRow[] = Array.from({ length: 20 }, (_, i) =>
+    makeEv({ id: `ev-${i}`, seq: i + 1, kind: 'turn', text: `Step ${i}` }),
+  );
+
+  let state = createTraceState(events);
+  assert.equal(state.follow, false);
+
+  // Toggle follow on -> selects last row and scrolls into view (vp = 10)
+  state = applyTraceAction(state, { type: 'toggleFollow' }, 10);
+  assert.equal(state.follow, true);
+  assert.equal(state.selectedId, 'ev-19');
+  assert.equal(state.scrollOffset, 10);
+
+  // Appending new events keeps newest row selected and scrolled into view
+  state = appendTraceEvents(
+    state,
+    [makeEv({ id: 'ev-20', seq: 21, kind: 'turn', text: 'Step 20' })],
+    10,
+  );
+  assert.equal(state.follow, true);
+  assert.equal(state.selectedId, 'ev-20');
+  assert.equal(state.scrollOffset, 11);
+
+  // Manual upward move disables follow
+  state = applyTraceAction(state, { type: 'moveUp' }, 10);
+  assert.equal(state.follow, false);
+  assert.equal(state.selectedId, 'ev-19');
+
+  // Moving back down to the last row re-enables follow
+  state = applyTraceAction(state, { type: 'moveDown' }, 10);
+  assert.equal(state.follow, true);
+  assert.equal(state.selectedId, 'ev-20');
+
+  // Manual upward scroll disables follow
+  state = applyTraceAction(state, { type: 'scrollBy', delta: -3 }, 10);
+  assert.equal(state.follow, false);
+  assert.equal(state.scrollOffset, 8);
+
+  // Selecting the last row via selectId re-enables follow
+  state = applyTraceAction(state, { type: 'selectId', id: 'ev-20' }, 10);
+  assert.equal(state.follow, true);
+  assert.equal(state.scrollOffset, 11);
+
+  // Toggle follow off via toggleFollow
+  state = applyTraceAction(state, { type: 'toggleFollow' }, 10);
+  assert.equal(state.follow, false);
+});

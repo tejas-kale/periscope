@@ -409,7 +409,12 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
   const renderHeader = () => {
     const focusLabel = activeSessionId ? `  |  pane: ${focus} (Tab)` : '';
-    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}${focusLabel}  |  q quit`;
+    const followLabel = activeSessionId
+      ? traceState.follow
+        ? '  |  [FOLLOW] (f)'
+        : '  |  follow: off (f)'
+      : '';
+    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}${focusLabel}${followLabel}  |  q quit`;
   };
 
   const renderFooter = () => {
@@ -658,9 +663,13 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const dispatchTrace = (action: TraceAction) => {
     const prevSel = traceState.selectedId;
     const prevRaw = traceState.rawMode;
+    const prevFollow = traceState.follow;
     const prevExp = prevSel ? traceState.outputExpanded.get(prevSel) : undefined;
     traceState = applyTraceAction(traceState, action, traceViewportHeight());
     renderTracePane();
+    if (traceState.follow !== prevFollow) {
+      renderHeader();
+    }
 
     const nextSel = traceState.selectedId;
     const nextExp = nextSel ? traceState.outputExpanded.get(nextSel) : undefined;
@@ -673,7 +682,11 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
-  const refresh = async () => {
+  let refreshing = false;
+  let queuedAll = false;
+  let queuedIds = new Set<string>();
+
+  const runRefresh = async (changedIds?: string[]) => {
     if (disposed) return;
     const [nextSessions, nextSandbox] = await Promise.all([
       options.service.listSessions({}),
@@ -685,15 +698,65 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     if (!listState.cursorKey && sessions.length > 0) {
       listState = createSessionListState(sessions);
     }
-    if (activeSessionId) {
+
+    let traceChanged = false;
+    let detailChanged = false;
+    let selectionChanged = false;
+
+    const currentSessionId = activeSessionId;
+    if (currentSessionId && (!changedIds || changedIds.includes(currentSessionId))) {
       const maxSeq = traceState.events.length
         ? traceState.events[traceState.events.length - 1]!.seq
         : -1;
-      const fresh = await options.service.getEvents(activeSessionId, maxSeq - REFETCH_WINDOW);
+      const fresh = await options.service.getEvents(currentSessionId, maxSeq - REFETCH_WINDOW);
       if (disposed) return;
-      traceState = appendTraceEvents(traceState, fresh);
+      if (activeSessionId === currentSessionId) {
+        const prevTrace = traceState;
+        traceState = appendTraceEvents(traceState, fresh, traceViewportHeight());
+        traceChanged = traceState !== prevTrace;
+        selectionChanged = traceState.selectedId !== prevTrace.selectedId;
+        detailChanged =
+          selectionChanged ||
+          (traceChanged &&
+            traceState.selectedId !== null &&
+            fresh.some(
+              (ev) => ev.id === traceState.selectedId || ev.parent_id === traceState.selectedId,
+            ));
+      }
     }
-    renderAll();
+
+    updatePaneVisibility();
+    renderHeader();
+    if (showSandboxDetail) renderSandboxDetail();
+    renderSessionsPane();
+    if (traceChanged) renderTracePane();
+    if (selectionChanged) {
+      loadedImages = [];
+      void loadImagesForSelectedStep();
+    }
+    if (detailChanged) renderDetailPane();
+    renderFooter();
+  };
+
+  const refresh = async (changedIds?: string[]) => {
+    if (disposed) return;
+    if (refreshing) {
+      if (!changedIds) queuedAll = true;
+      else for (const id of changedIds) queuedIds.add(id);
+      return;
+    }
+    refreshing = true;
+    try {
+      await runRefresh(changedIds);
+      while (!disposed && (queuedAll || queuedIds.size > 0)) {
+        const nextIds = queuedAll ? undefined : [...queuedIds];
+        queuedAll = false;
+        queuedIds.clear();
+        await runRefresh(nextIds);
+      }
+    } finally {
+      refreshing = false;
+    }
   };
 
   const onKeypress = (key: KeyInputLike) => {
@@ -767,6 +830,10 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
           dispatchTrace({ type: 'toggleRaw' });
           return;
         }
+        if (key.name === 'f') {
+          dispatchTrace({ type: 'toggleFollow' });
+          return;
+        }
         if (key.name === 'e') {
           const node = getSelectedNode(traceState);
           if (node) dispatchTrace({ type: 'toggleOutputExpand', id: node.ev.id });
@@ -804,8 +871,8 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       }
     }) ?? (() => {});
 
-  const offChange = options.service.onChange((_n: ChangeNotice) => {
-    void refresh();
+  const offChange = options.service.onChange((n: ChangeNotice) => {
+    void refresh(n.sessionIds);
   });
 
   const offSandbox = options.service.onSandbox((s: SandboxState) => {
