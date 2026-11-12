@@ -38,7 +38,17 @@ export type TraceAction =
   | { type: 'selectId'; id: string; scrollIntoView?: boolean }
   | { type: 'scrollBy'; delta: number }
   | { type: 'toggleRaw' }
-  | { type: 'toggleOutputExpand'; id: string };
+  | { type: 'toggleOutputExpand'; id: string }
+  | { type: 'cycleShow' }
+  | { type: 'setShow'; show: ShowFilter }
+  | { type: 'toggleCollapseAll' };
+
+export const SHOW_FILTERS: readonly ShowFilter[] = ['all', 'errors', 'reasoning', 'text'];
+
+/** Human-readable label for a ShowFilter value. */
+export function formatShowFilter(show: ShowFilter): string {
+  return show === 'text' ? 'model text' : show;
+}
 
 function rebuildRows(
   tree: Tree,
@@ -175,6 +185,66 @@ export function applyTraceAction(
       const next = new Map(state.outputExpanded);
       next.set(action.id, !(next.get(action.id) ?? false));
       return { ...state, outputExpanded: next };
+    }
+
+    case 'cycleShow':
+    case 'setShow': {
+      const nextShow =
+        action.type === 'setShow'
+          ? action.show
+          : SHOW_FILTERS[(SHOW_FILTERS.indexOf(state.show) + 1) % SHOW_FILTERS.length]!;
+      const rebuilt = rebuildRows(state.tree, nextShow, state.expanded, state.collapseAll, state.selectedId);
+      const visSel = state.selectedId ? visibleId(state.tree, state.selectedId) : null;
+      const selectedId =
+        visSel && rebuilt.rowIndex.has(visSel)
+          ? visSel
+          : rebuilt.rows.length > 0
+            ? rebuilt.rows[0]!.node.ev.id
+            : null;
+      const idx = selectedId ? (rebuilt.rowIndex.get(selectedId) ?? 0) : 0;
+      return {
+        ...state,
+        show: nextShow,
+        rows: rebuilt.rows,
+        rowIndex: rebuilt.rowIndex,
+        selectedId,
+        scrollOffset: rebuilt.rows.length > 0 ? clampScrollForIndex(idx, state.scrollOffset, vp) : 0,
+      };
+    }
+
+    case 'toggleCollapseAll': {
+      const collapseAll = !state.collapseAll;
+      const expanded = new Map<string, boolean>();
+      const rows = flatten(state.tree, {
+        show: state.show,
+        expanded,
+        collapseAll,
+      });
+      const rowIndex = new Map<string, number>();
+      for (let i = 0; i < rows.length; i++) {
+        rowIndex.set(rows[i]!.node.ev.id, i);
+      }
+      let selectedId: string | null = null;
+      if (state.selectedId) {
+        let cur = state.tree.byId.get(visibleId(state.tree, state.selectedId));
+        while (cur && !rowIndex.has(cur.ev.id)) {
+          cur = cur.parent ?? undefined;
+        }
+        if (cur && rowIndex.has(cur.ev.id)) selectedId = cur.ev.id;
+      }
+      if (!selectedId && rows.length > 0) {
+        selectedId = rows[0]!.node.ev.id;
+      }
+      const idx = selectedId ? (rowIndex.get(selectedId) ?? 0) : 0;
+      return {
+        ...state,
+        collapseAll,
+        expanded,
+        rows,
+        rowIndex,
+        selectedId,
+        scrollOffset: rows.length > 0 ? clampScrollForIndex(idx, state.scrollOffset, vp) : 0,
+      };
     }
 
     case 'scrollBy': {
@@ -314,5 +384,7 @@ export function keyToTraceAction(key: KeyInputLike): TraceAction | null {
   if (name === 'left' || name === 'h') return { type: 'collapseOrAscend' };
   if (name === 'space') return { type: 'toggleExpand' };
   if (name === 'r') return { type: 'toggleRaw' };
+  if (name === 'v') return { type: 'cycleShow' };
+  if (name === 'c') return { type: 'toggleCollapseAll' };
   return null;
 }

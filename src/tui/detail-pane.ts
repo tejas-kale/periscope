@@ -15,6 +15,8 @@ import {
 } from '@opentui/core';
 import type { AnsiSpan } from '../view-model/ansi.ts';
 import type { DetailModel, ImageRef } from '../view-model/detail.ts';
+import type { ContextGroup, SessionStats } from '../view-model/stats-context.ts';
+import { fmtDuration, fmtTokens } from '../view-model/tree.ts';
 
 export interface DetailPalette {
   fg: string;
@@ -190,14 +192,18 @@ export interface RenderDetailOptions {
   onToggleOutputExpand: () => void;
 }
 
-/** Populate the detail ScrollBoxRenderable with OpenTUI nodes for the selected step. */
-export function renderDetailContent(opts: RenderDetailOptions): void {
-  const { renderer, scrollBox, model, images, supportsImages, palette, syntaxStyle } = opts;
-
+function clearScrollBox(scrollBox: ScrollBoxRenderable): void {
   for (const child of [...scrollBox.getChildren()]) {
     scrollBox.remove(child);
     child.destroyRecursively();
   }
+}
+
+/** Populate the detail ScrollBoxRenderable with OpenTUI nodes for the selected step. */
+export function renderDetailContent(opts: RenderDetailOptions): void {
+  const { renderer, scrollBox, model, images, supportsImages, palette, syntaxStyle } = opts;
+
+  clearScrollBox(scrollBox);
 
   // Header bar inside detail pane
   const headRow = new BoxRenderable(renderer, {
@@ -378,6 +384,149 @@ export function renderDetailContent(opts: RenderDetailOptions): void {
           content: `[Image: ${img.ref.location}]`,
           fg: palette.mutedFg,
           paddingTop: 1,
+        }),
+      );
+    }
+  }
+}
+
+/** Render session totals and per-tool breakdown into the detail scroll box. */
+export function renderStatsContent(opts: {
+  renderer: CliRenderer;
+  scrollBox: ScrollBoxRenderable;
+  stats: SessionStats;
+  palette: DetailPalette;
+  onClose: () => void;
+}): void {
+  const { renderer, scrollBox, stats, palette, onClose } = opts;
+  clearScrollBox(scrollBox);
+  scrollBox.scrollTo(0);
+
+  const headerRow = new BoxRenderable(renderer, {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingBottom: 1,
+  });
+  headerRow.add(
+    new TextRenderable(renderer, {
+      content: 'Session Stats',
+      fg: palette.headingFg,
+      attributes: TextAttributes.BOLD,
+    }),
+  );
+  const closeBtn = new BoxRenderable(renderer, {
+    backgroundColor: palette.buttonBg,
+    paddingLeft: 1,
+    paddingRight: 1,
+    onMouseDown: () => onClose(),
+  });
+  closeBtn.add(new TextRenderable(renderer, { content: '[Close (s)]', fg: palette.buttonFg }));
+  headerRow.add(closeBtn);
+  scrollBox.add(headerRow);
+
+  const dur = fmtDuration(stats.durationMs) || '—';
+  const tin = fmtTokens(stats.tokensIn) || '0';
+  const tout = fmtTokens(stats.tokensOut) || '0';
+
+  scrollBox.add(
+    new TextRenderable(renderer, {
+      content: `Duration: ${dur}  |  Turns: ${stats.turns}  |  Tool calls: ${stats.toolCalls}`,
+      fg: palette.fg,
+    }),
+  );
+  scrollBox.add(
+    new TextRenderable(renderer, {
+      content: `Errors: ${stats.errors}  |  Tokens in: ${tin}  |  Tokens out: ${tout}`,
+      fg: stats.errors > 0 ? palette.errorFg : palette.fg,
+      paddingBottom: 1,
+    }),
+  );
+
+  if (stats.tools.length > 0) {
+    scrollBox.add(
+      new TextRenderable(renderer, {
+        content: `${'Tool'.padEnd(22)} ${'Calls'.padStart(6)} ${'Errors'.padStart(7)} ${'Time'.padStart(8)}`,
+        fg: palette.mutedFg,
+        attributes: TextAttributes.BOLD,
+      }),
+    );
+    for (const t of stats.tools.slice(0, 20)) {
+      const name = t.name.length > 21 ? `${t.name.slice(0, 20)}…` : t.name;
+      const errStr = t.errors > 0 ? String(t.errors) : '-';
+      const timeStr = fmtDuration(t.durationMs) || '—';
+      scrollBox.add(
+        new TextRenderable(renderer, {
+          content: `${name.padEnd(22)} ${String(t.calls).padStart(6)} ${errStr.padStart(7)} ${timeStr.padStart(8)}`,
+          fg: t.errors > 0 ? palette.errorFg : palette.fg,
+        }),
+      );
+    }
+  }
+}
+
+/** Render injected context (attachments and system reminders) into the detail scroll box. */
+export function renderContextContent(opts: {
+  renderer: CliRenderer;
+  scrollBox: ScrollBoxRenderable;
+  groups: ContextGroup[];
+  palette: DetailPalette;
+  onClose: () => void;
+}): void {
+  const { renderer, scrollBox, groups, palette, onClose } = opts;
+  clearScrollBox(scrollBox);
+  scrollBox.scrollTo(0);
+
+  const headerRow = new BoxRenderable(renderer, {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingBottom: 1,
+  });
+  headerRow.add(
+    new TextRenderable(renderer, {
+      content: 'Injected Context',
+      fg: palette.headingFg,
+      attributes: TextAttributes.BOLD,
+    }),
+  );
+  const closeBtn = new BoxRenderable(renderer, {
+    backgroundColor: palette.buttonBg,
+    paddingLeft: 1,
+    paddingRight: 1,
+    onMouseDown: () => onClose(),
+  });
+  closeBtn.add(new TextRenderable(renderer, { content: '[Close (i)]', fg: palette.buttonFg }));
+  headerRow.add(closeBtn);
+  scrollBox.add(headerRow);
+
+  if (groups.length === 0) {
+    scrollBox.add(
+      new TextRenderable(renderer, {
+        content: 'No injected context or system reminders in this session.',
+        fg: palette.mutedFg,
+      }),
+    );
+    return;
+  }
+
+  for (const g of groups) {
+    const countPart = g.count > 1 ? ` ×${g.count}` : '';
+    const timePart = g.latestEvent.ts != null ? `  ${new Date(g.latestEvent.ts).toLocaleTimeString()}` : '';
+    scrollBox.add(
+      new TextRenderable(renderer, {
+        content: `${g.title}${countPart}${timePart}`,
+        fg: palette.headingFg,
+        attributes: TextAttributes.BOLD,
+        paddingTop: 1,
+      }),
+    );
+    for (const f of g.fields) {
+      const text = f.value.includes('\n') ? `${f.label}:\n${f.value}` : `${f.label}: ${f.value}`;
+      scrollBox.add(
+        new TextRenderable(renderer, {
+          content: text,
+          fg: palette.fg,
         }),
       );
     }

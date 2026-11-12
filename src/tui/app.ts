@@ -30,6 +30,7 @@ import {
   applyTraceAction,
   computeWindow,
   createTraceState,
+  formatShowFilter,
   getSelectedNode,
   getVisibleRows,
   keyToTraceAction,
@@ -37,12 +38,15 @@ import {
   type TraceState,
 } from '../view-model/trace.ts';
 import { buildDetailModel, extractImageRefs } from '../view-model/detail.ts';
+import { buildContextGroups, computeSessionStats } from '../view-model/stats-context.ts';
 import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
 import { detectCapabilities } from './adapter.ts';
 import {
   createDetailSyntaxStyle,
   getDetailPalette,
+  renderContextContent,
   renderDetailContent,
+  renderStatsContent,
   type LoadedImage,
 } from './detail-pane.ts';
 
@@ -69,6 +73,7 @@ export interface PeriscopeAppHandle {
 }
 
 type FocusPane = 'sessions' | 'trace' | 'detail';
+type DetailMode = 'step' | 'stats' | 'context';
 
 const REFETCH_WINDOW = 200;
 
@@ -197,6 +202,9 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   let activeSessionId: string | null = null;
   let traceState: TraceState = createTraceState([]);
   let focus: FocusPane = 'sessions';
+  let detailMode: DetailMode = 'step';
+  let contextRawById = new Map<string, string | null>();
+  let contextLoadGen = 0;
   let loadedImages: LoadedImage[] = [];
   let imageLoadGen = 0;
 
@@ -284,6 +292,26 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     },
   });
 
+  const traceToolbarBox = new BoxRenderable(renderer, {
+    height: 1,
+    width: '100%',
+    flexShrink: 0,
+    backgroundColor: palette.headerBg,
+  });
+  const traceToolbarText = new TextRenderable(renderer, {
+    content: '',
+    fg: palette.headerFg,
+  });
+  traceToolbarBox.add(traceToolbarText);
+
+  const traceRowsBox = new BoxRenderable(renderer, {
+    flexDirection: 'column',
+    flexGrow: 1,
+    width: '100%',
+  });
+  tracePane.add(traceToolbarBox);
+  tracePane.add(traceRowsBox);
+
   const detailPane = new BoxRenderable(renderer, {
     flexDirection: 'column',
     width: 0,
@@ -347,7 +375,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
   const clearTraceRows = () => {
     for (const entry of traceRowNodes.values()) {
-      tracePane.remove(entry.box);
+      traceRowsBox.remove(entry.box);
       entry.box.destroyRecursively();
     }
     traceRowNodes.clear();
@@ -483,13 +511,27 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
-  const traceViewportHeight = () => Math.max(1, renderer.terminalHeight - 2);
+  const traceViewportHeight = () => Math.max(1, renderer.terminalHeight - 3);
+
+  const renderTraceToolbar = () => {
+    const paneWidth = Math.max(24, Math.floor(renderer.terminalWidth * 0.34) - 2);
+    const showLabel = formatShowFilter(traceState.show);
+    const collapseLabel = traceState.collapseAll ? 'Expand(c)' : 'Collapse(c)';
+    const statsLabel = detailMode === 'stats' ? '[Stats(s)]' : 'Stats(s)';
+    const ctxLabel = detailMode === 'context' ? '[Ctx(i)]' : 'Ctx(i)';
+    traceToolbarText.content = truncateText(
+      ` Show: ${showLabel} (v) | ${collapseLabel} | ${statsLabel} | ${ctxLabel}`,
+      paneWidth,
+    );
+  };
 
   const renderTracePane = () => {
     if (!activeSessionId) {
       clearTraceRows();
+      traceToolbarText.content = '';
       return;
     }
+    renderTraceToolbar();
     const rows = getVisibleRows(traceState);
     const vpHeight = traceViewportHeight();
     const { visibleRows } = computeWindow(rows, traceState.scrollOffset, vpHeight, 4);
@@ -498,7 +540,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     const keepIds = new Set(visibleRows.map((r) => r.node.ev.id));
     for (const [id, entry] of traceRowNodes.entries()) {
       if (!keepIds.has(id)) {
-        tracePane.remove(entry.box);
+        traceRowsBox.remove(entry.box);
         entry.box.destroyRecursively();
         traceRowNodes.delete(id);
       }
@@ -527,22 +569,70 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
         });
         const text = new TextRenderable(renderer, { content: label, fg });
         box.add(text);
-        tracePane.add(box, i);
+        traceRowsBox.add(box, i);
         entry = { box, text };
         traceRowNodes.set(id, entry);
       } else {
         entry.box.backgroundColor = bg ?? 'transparent';
         entry.text.content = label;
         entry.text.fg = fg;
-        if (tracePane.getChildren()[i] !== entry.box) {
-          tracePane.add(entry.box, i);
+        if (traceRowsBox.getChildren()[i] !== entry.box) {
+          traceRowsBox.add(entry.box, i);
         }
       }
     }
   };
 
+  const loadContextRaw = async () => {
+    const gen = ++contextLoadGen;
+    const groups = buildContextGroups(traceState.events, contextRawById);
+    let updated = false;
+    for (const g of groups) {
+      if (contextRawById.has(g.latestEvent.id)) continue;
+      try {
+        const raw = await options.service.getRaw(g.latestEvent.id);
+        if (disposed || gen !== contextLoadGen) return;
+        contextRawById.set(g.latestEvent.id, raw);
+        updated = true;
+      } catch {
+        // Ignore raw read errors for individual context items
+      }
+    }
+    if (updated && !disposed && gen === contextLoadGen && detailMode === 'context') {
+      renderDetailPane();
+    }
+  };
+
   const renderDetailPane = () => {
     if (!activeSessionId) return;
+    if (detailMode === 'stats') {
+      renderStatsContent({
+        renderer,
+        scrollBox: detailScroll,
+        stats: computeSessionStats(traceState.tree, traceState.events),
+        palette: detailPalette,
+        onClose: () => {
+          detailMode = 'step';
+          renderTraceToolbar();
+          renderDetailPane();
+        },
+      });
+      return;
+    }
+    if (detailMode === 'context') {
+      renderContextContent({
+        renderer,
+        scrollBox: detailScroll,
+        groups: buildContextGroups(traceState.events, contextRawById),
+        palette: detailPalette,
+        onClose: () => {
+          detailMode = 'step';
+          renderTraceToolbar();
+          renderDetailPane();
+        },
+      });
+      return;
+    }
     const node = getSelectedNode(traceState);
     const outputExpanded = node ? (traceState.outputExpanded.get(node.ev.id) ?? false) : false;
     const model = buildDetailModel(node, {
@@ -610,6 +700,8 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const openSession = async (session: SessionRow) => {
     activeSessionId = session.id;
     focus = 'trace';
+    detailMode = 'step';
+    contextRawById = new Map();
     loadedImages = [];
     traceState = createTraceState([]);
     renderAll();
@@ -669,7 +761,9 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
         loadedImages = [];
         void loadImagesForSelectedStep();
       }
-      renderDetailPane();
+      if (detailMode === 'step') {
+        renderDetailPane();
+      }
     }
   };
 
@@ -738,6 +832,32 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
 
+    if (focus === 'trace' || focus === 'detail') {
+      if (!key.ctrl && !key.meta && !key.shift) {
+        if (key.name === 's') {
+          detailMode = detailMode === 'stats' ? 'step' : 'stats';
+          renderTraceToolbar();
+          renderDetailPane();
+          return;
+        }
+        if (key.name === 'i') {
+          detailMode = detailMode === 'context' ? 'step' : 'context';
+          renderTraceToolbar();
+          renderDetailPane();
+          if (detailMode === 'context') void loadContextRaw();
+          return;
+        }
+        if (key.name === 'v') {
+          dispatchTrace({ type: 'cycleShow' });
+          return;
+        }
+        if (key.name === 'c') {
+          dispatchTrace({ type: 'toggleCollapseAll' });
+          return;
+        }
+      }
+    }
+
     if (focus === 'trace') {
       if (!key.ctrl && !key.meta && key.name === 'e') {
         const node = getSelectedNode(traceState);
@@ -745,9 +865,12 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
         return;
       }
       if (!key.ctrl && !key.meta && key.name === 'return') {
+        detailMode = 'step';
         focus = 'detail';
         renderHeader();
         updatePaneBorders();
+        renderTraceToolbar();
+        renderDetailPane();
         return;
       }
       const action = keyToTraceAction(key);
@@ -758,6 +881,12 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     if (focus === 'detail') {
       if (!key.ctrl && !key.meta) {
         if (key.name === 'escape' || key.name === 'esc' || key.sequence === '\x1b' || key.name === 'h') {
+          if (detailMode !== 'step' && key.name !== 'h') {
+            detailMode = 'step';
+            renderTraceToolbar();
+            renderDetailPane();
+            return;
+          }
           focus = 'trace';
           renderHeader();
           updatePaneBorders();
