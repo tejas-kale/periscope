@@ -23,6 +23,7 @@ export interface TraceState {
   expanded: Map<string, boolean>;
   rawMode: boolean;
   outputExpanded: Map<string, boolean>;
+  follow: boolean;
 }
 
 export type TraceAction =
@@ -38,7 +39,8 @@ export type TraceAction =
   | { type: 'selectId'; id: string; scrollIntoView?: boolean }
   | { type: 'scrollBy'; delta: number }
   | { type: 'toggleRaw' }
-  | { type: 'toggleOutputExpand'; id: string };
+  | { type: 'toggleOutputExpand'; id: string }
+  | { type: 'toggleFollow' };
 
 function rebuildRows(
   tree: Tree,
@@ -89,11 +91,16 @@ export function createTraceState(events: EventRow[], focusEventId?: string | nul
     expanded,
     rawMode: false,
     outputExpanded: new Map(),
+    follow: false,
   };
 }
 
-/** Merge newly arrived events into the trace without disturbing selection or scrollOffset. */
-export function appendTraceEvents(state: TraceState, fresh: EventRow[]): TraceState {
+/** Merge newly arrived events into the trace; when follow is on, select and scroll to the newest row. */
+export function appendTraceEvents(
+  state: TraceState,
+  fresh: EventRow[],
+  viewportHeight = 20,
+): TraceState {
   if (!fresh.length) return state;
   const events = mergeEvents(state.events, fresh);
   const tree = buildTree(events);
@@ -102,8 +109,20 @@ export function appendTraceEvents(state: TraceState, fresh: EventRow[]): TraceSt
     state.show,
     state.expanded,
     state.collapseAll,
-    state.selectedId,
+    state.follow ? null : state.selectedId,
   );
+  if (state.follow && rows.length > 0) {
+    const lastIdx = rows.length - 1;
+    return {
+      ...state,
+      events,
+      tree,
+      rows,
+      rowIndex,
+      selectedId: rows[lastIdx]!.node.ev.id,
+      scrollOffset: clampScrollForIndex(lastIdx, state.scrollOffset, Math.max(1, viewportHeight)),
+    };
+  }
   const selectedId =
     state.selectedId && rowIndex.has(visibleId(tree, state.selectedId))
       ? visibleId(tree, state.selectedId)
@@ -177,10 +196,24 @@ export function applyTraceAction(
       return { ...state, outputExpanded: next };
     }
 
+    case 'toggleFollow': {
+      if (state.follow) return { ...state, follow: false };
+      if (!rows.length) return { ...state, follow: true };
+      const lastIdx = rows.length - 1;
+      return {
+        ...state,
+        follow: true,
+        selectedId: rows[lastIdx]!.node.ev.id,
+        scrollOffset: clampScrollForIndex(lastIdx, state.scrollOffset, vp),
+      };
+    }
+
     case 'scrollBy': {
       const maxScroll = Math.max(0, rows.length - vp);
       const nextScroll = Math.max(0, Math.min(maxScroll, state.scrollOffset + action.delta));
-      return nextScroll === state.scrollOffset ? state : { ...state, scrollOffset: nextScroll };
+      const nextFollow = action.delta < 0 ? false : state.follow;
+      if (nextScroll === state.scrollOffset && nextFollow === state.follow) return state;
+      return { ...state, scrollOffset: nextScroll, follow: nextFollow };
     }
 
     case 'selectId': {
@@ -204,6 +237,7 @@ export function applyTraceAction(
         rowIndex: nextIndex,
         selectedId: id,
         scrollOffset,
+        follow: nextRows.length > 0 && idx === nextRows.length - 1,
       };
     }
 
@@ -225,8 +259,14 @@ export function applyTraceAction(
 
       const targetId = rows[targetIdx]!.node.ev.id;
       const scrollOffset = clampScrollForIndex(targetIdx, state.scrollOffset, vp);
-      if (targetId === state.selectedId && scrollOffset === state.scrollOffset) return state;
-      return { ...state, selectedId: targetId, scrollOffset };
+      const nextFollow =
+        action.type === 'moveUp' || action.type === 'pageUp' || action.type === 'jumpTop'
+          ? false
+          : targetIdx === rows.length - 1;
+      if (targetId === state.selectedId && scrollOffset === state.scrollOffset && nextFollow === state.follow) {
+        return state;
+      }
+      return { ...state, selectedId: targetId, scrollOffset, follow: nextFollow };
     }
 
     case 'toggleExpand':
@@ -260,11 +300,13 @@ export function applyTraceAction(
           return { ...state, expanded, rows: rebuilt.rows, rowIndex: rebuilt.rowIndex };
         }
         if (row.hasChildren && row.expanded && curIdx + 1 < rows.length) {
-          const nextId = rows[curIdx + 1]!.node.ev.id;
+          const nextIdx = curIdx + 1;
+          const nextId = rows[nextIdx]!.node.ev.id;
           return {
             ...state,
             selectedId: nextId,
-            scrollOffset: clampScrollForIndex(curIdx + 1, state.scrollOffset, vp),
+            scrollOffset: clampScrollForIndex(nextIdx, state.scrollOffset, vp),
+            follow: nextIdx === rows.length - 1,
           };
         }
         return state;
@@ -292,6 +334,7 @@ export function applyTraceAction(
             ...state,
             selectedId: parentId,
             scrollOffset: clampScrollForIndex(pIdx, state.scrollOffset, vp),
+            follow: false,
           };
         }
       }
@@ -314,5 +357,6 @@ export function keyToTraceAction(key: KeyInputLike): TraceAction | null {
   if (name === 'left' || name === 'h') return { type: 'collapseOrAscend' };
   if (name === 'space') return { type: 'toggleExpand' };
   if (name === 'r') return { type: 'toggleRaw' };
+  if (name === 'f') return { type: 'toggleFollow' };
   return null;
 }
