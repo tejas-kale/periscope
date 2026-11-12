@@ -9,9 +9,13 @@ A full-screen terminal app to browse, search, and watch live the transcripts of 
 ## Run
 
 ```sh
-npm install          # installs @opentui/core and TypeScript dev tooling
+npm install          # installs @opentui/core and builds dist/ via prepare
 node src/cli/index.ts [options]
-# or if linked / installed globally:
+# or install globally from a local clone or GitHub:
+npm link
+npm install -g github:tejas-kale/periscope
+# or from a tagged GitHub Release tarball:
+npm install -g https://github.com/tejas-kale/periscope/releases/latest/download/periscope-0.1.0.tgz
 periscope [options]
 ```
 
