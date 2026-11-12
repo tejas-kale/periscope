@@ -155,3 +155,64 @@ test('trace view-model: follow mode tracks newest step, disables on upward move/
   state = applyTraceAction(state, { type: 'toggleFollow' }, 10);
   assert.equal(state.follow, false);
 });
+
+test('trace view-model: cycleShow, setShow, and toggleCollapseAll preserve valid selection', () => {
+  const events: EventRow[] = [
+    makeEv({ id: 't1', seq: 1, kind: 'turn', text: 'Turn 1' }),
+    makeEv({ id: 'r1', seq: 2, parent_id: 't1', kind: 'reasoning', text: 'Thinking...' }),
+    makeEv({ id: 'm1', seq: 3, parent_id: 't1', kind: 'text', text: 'Answer' }),
+    makeEv({ id: 't2', seq: 4, kind: 'turn', text: 'Turn 2' }),
+    makeEv({ id: 'e1', seq: 5, parent_id: 't2', kind: 'error', text: 'Boom' }),
+  ];
+
+  let state = createTraceState(events);
+  assert.equal(state.show, 'all');
+  assert.equal(state.rows.length, 5);
+
+  // Select m1, then cycleShow -> 'errors' (m1 is filtered out, selection moves to valid row)
+  state = applyTraceAction(state, { type: 'selectId', id: 'm1' }, 10);
+  assert.equal(state.selectedId, 'm1');
+
+  state = applyTraceAction(state, { type: 'cycleShow' }, 10);
+  assert.equal(state.show, 'errors');
+  assert.deepEqual(
+    state.rows.map((r) => r.node.ev.id),
+    ['t2', 'e1'],
+  );
+  assert.ok(state.selectedId && state.rowIndex.has(state.selectedId));
+
+  state = applyTraceAction(state, { type: 'cycleShow' }, 10);
+  assert.equal(state.show, 'reasoning');
+  assert.deepEqual(
+    state.rows.map((r) => r.node.ev.id),
+    ['t1', 'r1'],
+  );
+  assert.ok(state.selectedId && state.rowIndex.has(state.selectedId));
+
+  state = applyTraceAction(state, { type: 'cycleShow' }, 10);
+  assert.equal(state.show, 'text');
+  assert.deepEqual(
+    state.rows.map((r) => r.node.ev.id),
+    ['t1', 'm1'],
+  );
+
+  state = applyTraceAction(state, { type: 'cycleShow' }, 10);
+  assert.equal(state.show, 'all');
+  assert.equal(state.rows.length, 5);
+
+  // Select child m1, toggleCollapseAll -> collapses t1 and t2, moves selection to ancestor t1
+  state = applyTraceAction(state, { type: 'selectId', id: 'm1' }, 10);
+  state = applyTraceAction(state, { type: 'toggleCollapseAll' }, 10);
+  assert.equal(state.collapseAll, true);
+  assert.deepEqual(
+    state.rows.map((r) => r.node.ev.id),
+    ['t1', 't2'],
+  );
+  assert.equal(state.selectedId, 't1');
+
+  // Toggle again -> expands all
+  state = applyTraceAction(state, { type: 'toggleCollapseAll' }, 10);
+  assert.equal(state.collapseAll, false);
+  assert.equal(state.rows.length, 5);
+  assert.equal(state.selectedId, 't1');
+});

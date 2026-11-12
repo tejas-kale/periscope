@@ -72,10 +72,11 @@ const KEEP_ATTACHMENTS = new Set(['queued_command']);
 /** Attachment type of a Claude attachment meta event (the first line of its text). */
 export const attachmentType = (ev: EventRow) => (ev.kind === 'meta' && ev.role === 'attachment' ? ev.text.split('\n')[0] : null);
 
-/** Context Claude Code injected for the model (environment, date, hooks, listings): shown in the Context panel, not the trace. */
+/** Context Claude Code injected for the model (environment, date, hooks, listings, system reminders): shown in the Context panel, not the trace. */
 export function isContext(ev: EventRow): boolean {
   const t = attachmentType(ev);
-  return t != null && !KEEP_ATTACHMENTS.has(t) && !/error|block|denied/.test(t);
+  if (t != null) return !KEEP_ATTACHMENTS.has(t) && !/error|block|denied/.test(t);
+  return ev.kind === 'meta' && /<system-reminder>/i.test(ev.text);
 }
 
 const tag = (text: string, name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text)?.[1];

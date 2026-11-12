@@ -45,7 +45,7 @@ test('headless UI live: append preserves scroll/selection when follow is off, tr
     const { createTestRenderer } = await import('@opentui/core/testing');
     const { renderer, mockInput, mockMouse, renderOnce, captureCharFrame } = await createTestRenderer({
       width: 140,
-      height: 24,
+      height: 25,
     });
 
     const handle = mountPeriscopeApp(renderer, {
