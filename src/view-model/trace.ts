@@ -1,8 +1,10 @@
 import type { EventRow } from '../core/types.ts';
 import {
   buildTree,
+  findMatches,
   flatten,
   mergeEvents,
+  treeOrder,
   visibleId,
   type Row,
   type ShowFilter,
@@ -10,6 +12,15 @@ import {
   type TreeNode,
 } from './tree.ts';
 import type { KeyInputLike } from './session-list.ts';
+
+export interface TraceFindState {
+  open: boolean;
+  query: string;
+  matchIds: string[];
+  matchSet: Set<string>;
+  totalHits: number;
+  matchIdx: number;
+}
 
 export interface TraceState {
   events: EventRow[];
@@ -23,6 +34,7 @@ export interface TraceState {
   expanded: Map<string, boolean>;
   rawMode: boolean;
   outputExpanded: Map<string, boolean>;
+  find: TraceFindState;
 }
 
 export type TraceAction =
@@ -38,7 +50,34 @@ export type TraceAction =
   | { type: 'selectId'; id: string; scrollIntoView?: boolean }
   | { type: 'scrollBy'; delta: number }
   | { type: 'toggleRaw' }
-  | { type: 'toggleOutputExpand'; id: string };
+  | { type: 'toggleOutputExpand'; id: string }
+  | { type: 'openFind' }
+  | { type: 'setFindQuery'; query: string }
+  | { type: 'nextMatch' }
+  | { type: 'prevMatch' }
+  | { type: 'closeFind' };
+
+function emptyFindState(open = false): TraceFindState {
+  return {
+    open,
+    query: '',
+    matchIds: [],
+    matchSet: new Set(),
+    totalHits: 0,
+    matchIdx: 0,
+  };
+}
+
+function computeMatchesForTree(
+  events: EventRow[],
+  tree: Tree,
+  query: string,
+): { matchIds: string[]; totalHits: number } {
+  const m = findMatches(events, query);
+  if (!m.ids.length) return { matchIds: [], totalHits: 0 };
+  const matchIds = [...new Set(treeOrder(tree, m.ids).map((id) => visibleId(tree, id)))];
+  return { matchIds, totalHits: m.count };
+}
 
 function rebuildRows(
   tree: Tree,
@@ -46,13 +85,15 @@ function rebuildRows(
   expanded: Map<string, boolean>,
   collapseAll: boolean,
   selectedId: string | null,
+  extraReveal: readonly string[] = [],
 ): { rows: Row[]; rowIndex: Map<string, number> } {
   const sel = selectedId ? visibleId(tree, selectedId) : null;
+  const reveal = sel ? [...extraReveal, sel] : extraReveal;
   const rows = flatten(tree, {
     show,
     expanded,
     collapseAll,
-    reveal: sel ? [sel] : undefined,
+    reveal: reveal.length ? reveal : undefined,
   });
   const rowIndex = new Map<string, number>();
   for (let i = 0; i < rows.length; i++) {
@@ -89,6 +130,7 @@ export function createTraceState(events: EventRow[], focusEventId?: string | nul
     expanded,
     rawMode: false,
     outputExpanded: new Map(),
+    find: emptyFindState(false),
   };
 }
 
@@ -97,6 +139,46 @@ export function appendTraceEvents(state: TraceState, fresh: EventRow[]): TraceSt
   if (!fresh.length) return state;
   const events = mergeEvents(state.events, fresh);
   const tree = buildTree(events);
+  let find = state.find;
+  if (find.open && find.query.trim()) {
+    const computed = computeMatchesForTree(events, tree, find.query);
+    const { rows: preRows, rowIndex: preIndex } = rebuildRows(
+      tree,
+      state.show,
+      state.expanded,
+      state.collapseAll,
+      state.selectedId,
+      computed.matchIds,
+    );
+    const visibleMatches = computed.matchIds.filter((id) => preIndex.has(id));
+    const matchIdx = visibleMatches.length
+      ? Math.min(find.matchIdx, visibleMatches.length - 1)
+      : 0;
+    find = {
+      ...find,
+      matchIds: visibleMatches,
+      matchSet: new Set(visibleMatches),
+      totalHits: computed.totalHits,
+      matchIdx,
+    };
+    const selectedId =
+      state.selectedId && preIndex.has(visibleId(tree, state.selectedId))
+        ? visibleId(tree, state.selectedId)
+        : preRows.length > 0
+          ? preRows[0]!.node.ev.id
+          : null;
+    const maxScroll = Math.max(0, preRows.length - 1);
+    return {
+      ...state,
+      events,
+      tree,
+      rows: preRows,
+      rowIndex: preIndex,
+      selectedId,
+      scrollOffset: Math.min(state.scrollOffset, maxScroll),
+      find,
+    };
+  }
   const { rows, rowIndex } = rebuildRows(
     tree,
     state.show,
@@ -188,7 +270,14 @@ export function applyTraceAction(
       let nextRows = rows;
       let nextIndex = rowIndex;
       if (!nextIndex.has(id)) {
-        const rebuilt = rebuildRows(state.tree, state.show, state.expanded, state.collapseAll, id);
+        const rebuilt = rebuildRows(
+          state.tree,
+          state.show,
+          state.expanded,
+          state.collapseAll,
+          id,
+          state.find.matchIds,
+        );
         nextRows = rebuilt.rows;
         nextIndex = rebuilt.rowIndex;
       }
@@ -204,6 +293,96 @@ export function applyTraceAction(
         rowIndex: nextIndex,
         selectedId: id,
         scrollOffset,
+      };
+    }
+
+    case 'openFind': {
+      if (state.find.open) return state;
+      return {
+        ...state,
+        find: emptyFindState(true),
+      };
+    }
+
+    case 'setFindQuery': {
+      const query = action.query;
+      const computed = computeMatchesForTree(state.events, state.tree, query);
+      const rebuilt = rebuildRows(
+        state.tree,
+        state.show,
+        state.expanded,
+        state.collapseAll,
+        state.selectedId,
+        computed.matchIds,
+      );
+      const visibleMatches = computed.matchIds.filter((id) => rebuilt.rowIndex.has(id));
+      const matchSet = new Set(visibleMatches);
+      let selectedId = state.selectedId;
+      let scrollOffset = state.scrollOffset;
+      if (visibleMatches.length > 0) {
+        selectedId = visibleMatches[0]!;
+        const idx = rebuilt.rowIndex.get(selectedId);
+        if (idx != null) scrollOffset = clampScrollForIndex(idx, scrollOffset, vp);
+      } else {
+        const maxScroll = Math.max(0, rebuilt.rows.length - vp);
+        scrollOffset = Math.min(scrollOffset, maxScroll);
+      }
+      return {
+        ...state,
+        rows: rebuilt.rows,
+        rowIndex: rebuilt.rowIndex,
+        selectedId,
+        scrollOffset,
+        find: {
+          open: true,
+          query,
+          matchIds: visibleMatches,
+          matchSet,
+          totalHits: computed.totalHits,
+          matchIdx: 0,
+        },
+      };
+    }
+
+    case 'nextMatch':
+    case 'prevMatch': {
+      if (!state.find.open || state.find.matchIds.length === 0) return state;
+      const len = state.find.matchIds.length;
+      const delta = action.type === 'nextMatch' ? 1 : -1;
+      const nextIdx = (state.find.matchIdx + delta + len) % len;
+      const targetId = state.find.matchIds[nextIdx]!;
+      const idx = rowIndex.get(targetId);
+      const scrollOffset = idx != null ? clampScrollForIndex(idx, state.scrollOffset, vp) : state.scrollOffset;
+      return {
+        ...state,
+        selectedId: targetId,
+        scrollOffset,
+        find: {
+          ...state.find,
+          matchIdx: nextIdx,
+        },
+      };
+    }
+
+    case 'closeFind': {
+      if (!state.find.open && !state.find.query && state.find.matchIds.length === 0) return state;
+      const rebuilt = rebuildRows(
+        state.tree,
+        state.show,
+        state.expanded,
+        state.collapseAll,
+        state.selectedId,
+      );
+      const idx = state.selectedId ? rebuilt.rowIndex.get(state.selectedId) : undefined;
+      const maxScroll = Math.max(0, rebuilt.rows.length - vp);
+      const scrollOffset =
+        idx != null ? clampScrollForIndex(idx, Math.min(state.scrollOffset, maxScroll), vp) : Math.min(state.scrollOffset, maxScroll);
+      return {
+        ...state,
+        rows: rebuilt.rows,
+        rowIndex: rebuilt.rowIndex,
+        scrollOffset,
+        find: emptyFindState(false),
       };
     }
 

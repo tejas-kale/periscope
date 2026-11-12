@@ -15,6 +15,7 @@ import {
 } from '@opentui/core';
 import type { AnsiSpan } from '../view-model/ansi.ts';
 import type { DetailModel, ImageRef } from '../view-model/detail.ts';
+import { buildHighlightedStyledText, highlightTextChunks } from './highlight.ts';
 
 export interface DetailPalette {
   fg: string;
@@ -28,6 +29,8 @@ export interface DetailPalette {
   removedBg: string;
   addedSign: string;
   removedSign: string;
+  matchBg: string;
+  matchFg: string;
   ansi: Record<string, string>;
 }
 
@@ -45,6 +48,8 @@ export function getDetailPalette(mode: 'dark' | 'light'): DetailPalette {
       removedBg: '#fee2e2',
       addedSign: '#15803d',
       removedSign: '#b91c1c',
+      matchBg: '#facc15',
+      matchFg: '#111827',
       ansi: {
         'ansi-black': '#111827',
         'ansi-red': '#dc2626',
@@ -77,6 +82,8 @@ export function getDetailPalette(mode: 'dark' | 'light'): DetailPalette {
     removedBg: '#7f1d1d',
     addedSign: '#4ade80',
     removedSign: '#f87171',
+    matchBg: '#facc15',
+    matchFg: '#111827',
     ansi: {
       'ansi-black': '#374151',
       'ansi-red': '#f87171',
@@ -155,21 +162,34 @@ function resolveAnsiColor(color: string | undefined, palette: DetailPalette): RG
   return mapped ? RGBA.fromHex(mapped) : undefined;
 }
 
-function ansiToStyledText(spans: AnsiSpan[], palette: DetailPalette): StyledText {
-  const chunks: TextChunk[] = spans.map((s) => {
+function ansiToStyledText(
+  spans: AnsiSpan[],
+  palette: DetailPalette,
+  findQuery = '',
+  matchBg?: RGBA,
+  matchFg?: RGBA,
+): StyledText {
+  const chunks: TextChunk[] = [];
+  for (const s of spans) {
     let attributes = TextAttributes.NONE;
     if (s.bold) attributes |= TextAttributes.BOLD;
     if (s.dim) attributes |= TextAttributes.DIM;
     if (s.italic) attributes |= TextAttributes.ITALIC;
     if (s.underline) attributes |= TextAttributes.UNDERLINE;
-    return {
-      __isChunk: true,
-      text: s.text,
-      fg: resolveAnsiColor(s.fg, palette),
-      bg: resolveAnsiColor(s.bg, palette),
-      attributes,
-    };
-  });
+    const fg = resolveAnsiColor(s.fg, palette);
+    const bg = resolveAnsiColor(s.bg, palette);
+    if (findQuery.trim() && matchBg && matchFg) {
+      chunks.push(...highlightTextChunks(s.text, findQuery, fg, matchBg, matchFg, bg, attributes));
+    } else {
+      chunks.push({
+        __isChunk: true,
+        text: s.text,
+        fg,
+        bg,
+        attributes,
+      });
+    }
+  }
   return new StyledText(chunks);
 }
 
@@ -186,6 +206,7 @@ export interface RenderDetailOptions {
   supportsImages: boolean;
   palette: DetailPalette;
   syntaxStyle: SyntaxStyle;
+  findQuery?: string;
   onToggleRaw: () => void;
   onToggleOutputExpand: () => void;
 }
@@ -193,6 +214,12 @@ export interface RenderDetailOptions {
 /** Populate the detail ScrollBoxRenderable with OpenTUI nodes for the selected step. */
 export function renderDetailContent(opts: RenderDetailOptions): void {
   const { renderer, scrollBox, model, images, supportsImages, palette, syntaxStyle } = opts;
+  const query = opts.findQuery?.trim() ?? '';
+  const lowerQuery = query.toLowerCase();
+  const baseFg = RGBA.fromHex(palette.fg);
+  const matchBg = RGBA.fromHex(palette.matchBg);
+  const matchFg = RGBA.fromHex(palette.matchFg);
+  const hasMatch = (text: string) => Boolean(lowerQuery) && text.toLowerCase().includes(lowerQuery);
 
   for (const child of [...scrollBox.getChildren()]) {
     scrollBox.remove(child);
@@ -258,10 +285,12 @@ export function renderDetailContent(opts: RenderDetailOptions): void {
         break;
       }
       case 'markdown': {
-        if (block.raw) {
+        if (block.raw || hasMatch(block.text)) {
           scrollBox.add(
             new TextRenderable(renderer, {
-              content: block.text,
+              content: hasMatch(block.text)
+                ? buildHighlightedStyledText(block.text, query, baseFg, matchBg, matchFg)
+                : block.text,
               fg: palette.fg,
             }),
           );
@@ -281,51 +310,73 @@ export function renderDetailContent(opts: RenderDetailOptions): void {
         if (block.title) {
           scrollBox.add(
             new TextRenderable(renderer, {
-              content: block.title,
+              content: hasMatch(block.title)
+                ? buildHighlightedStyledText(block.title, query, RGBA.fromHex(palette.mutedFg), matchBg, matchFg)
+                : block.title,
               fg: palette.mutedFg,
             }),
           );
         }
-        scrollBox.add(
-          new CodeRenderable(renderer, {
-            content: block.code,
-            filetype: block.lang ?? undefined,
-            syntaxStyle,
-            fg: palette.fg,
-            width: '100%',
-          }),
-        );
+        if (hasMatch(block.code)) {
+          scrollBox.add(
+            new TextRenderable(renderer, {
+              content: buildHighlightedStyledText(block.code, query, baseFg, matchBg, matchFg),
+              fg: palette.fg,
+            }),
+          );
+        } else {
+          scrollBox.add(
+            new CodeRenderable(renderer, {
+              content: block.code,
+              filetype: block.lang ?? undefined,
+              syntaxStyle,
+              fg: palette.fg,
+              width: '100%',
+            }),
+          );
+        }
         break;
       }
       case 'diff': {
         if (block.title) {
           scrollBox.add(
             new TextRenderable(renderer, {
-              content: block.title,
+              content: hasMatch(block.title)
+                ? buildHighlightedStyledText(block.title, query, RGBA.fromHex(palette.mutedFg), matchBg, matchFg)
+                : block.title,
               fg: palette.mutedFg,
             }),
           );
         }
-        scrollBox.add(
-          new DiffRenderable(renderer, {
-            diff: block.diffText,
-            view: 'unified',
-            syntaxStyle,
-            fg: palette.fg,
-            addedBg: palette.addedBg,
-            removedBg: palette.removedBg,
-            addedSignColor: palette.addedSign,
-            removedSignColor: palette.removedSign,
-            showLineNumbers: true,
-            width: '100%',
-          }),
-        );
+        if (hasMatch(block.diffText)) {
+          scrollBox.add(
+            new TextRenderable(renderer, {
+              content: buildHighlightedStyledText(block.diffText, query, baseFg, matchBg, matchFg),
+              fg: palette.fg,
+            }),
+          );
+        } else {
+          scrollBox.add(
+            new DiffRenderable(renderer, {
+              diff: block.diffText,
+              view: 'unified',
+              syntaxStyle,
+              fg: palette.fg,
+              addedBg: palette.addedBg,
+              removedBg: palette.removedBg,
+              addedSignColor: palette.addedSign,
+              removedSignColor: palette.removedSign,
+              showLineNumbers: true,
+              width: '100%',
+            }),
+          );
+        }
         break;
       }
       case 'ansi': {
         scrollBox.add(
           new TextRenderable(renderer, {
-            content: ansiToStyledText(block.spans, palette),
+            content: ansiToStyledText(block.spans, palette, query, matchBg, matchFg),
           }),
         );
         break;
@@ -333,7 +384,9 @@ export function renderDetailContent(opts: RenderDetailOptions): void {
       case 'text': {
         scrollBox.add(
           new TextRenderable(renderer, {
-            content: block.text,
+            content: hasMatch(block.text)
+              ? buildHighlightedStyledText(block.text, query, baseFg, matchBg, matchFg)
+              : block.text,
             fg: palette.fg,
           }),
         );
