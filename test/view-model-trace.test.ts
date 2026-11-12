@@ -106,3 +106,36 @@ test('trace view-model: windowing slices visible rows and append preserves selec
   assert.equal(state.scrollOffset, 6);
   assert.equal(getVisibleRows(state).length, 55);
 });
+
+test('trace view-model: selectId expands collapsed ancestors and keeps them open', () => {
+  const events: EventRow[] = [
+    makeEv({ id: 'turn-1', seq: 1, kind: 'turn', text: 'Turn 1' }),
+    makeEv({ id: 'call-1', seq: 2, parent_id: 'turn-1', kind: 'tool_call', tool_name: 'Bash', text: '{"cmd":"ls"}' }),
+    makeEv({ id: 'res-1', seq: 3, parent_id: 'call-1', kind: 'tool_result', text: 'needle output' }),
+    makeEv({ id: 'turn-2', seq: 4, kind: 'turn', text: 'Turn 2' }),
+  ];
+
+  let state = createTraceState(events);
+  // Collapse turn-1
+  state = applyTraceAction(state, { type: 'collapseOrAscend' }, 10);
+  assert.deepEqual(
+    getVisibleRows(state).map((r) => r.node.ev.id),
+    ['turn-1', 'turn-2'],
+  );
+
+  // Select folded tool_result res-1 -> maps to call-1 and expands turn-1
+  state = applyTraceAction(state, { type: 'selectId', id: 'res-1', scrollIntoView: true }, 10);
+  assert.equal(state.selectedId, 'call-1');
+  assert.deepEqual(
+    getVisibleRows(state).map((r) => r.node.ev.id),
+    ['turn-1', 'call-1', 'turn-2'],
+  );
+
+  // Moving to turn-2 keeps turn-1 expanded
+  state = applyTraceAction(state, { type: 'moveDown' }, 10);
+  assert.equal(state.selectedId, 'turn-2');
+  assert.deepEqual(
+    getVisibleRows(state).map((r) => r.node.ev.id),
+    ['turn-1', 'call-1', 'turn-2'],
+  );
+});
