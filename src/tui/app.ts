@@ -85,6 +85,7 @@ import {
 } from '../view-model/clipboard.ts';
 import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
 import { createOpenTuiAdapter, type TuiAdapter } from './adapter.ts';
+import { buildHighlightedStyledText } from './highlight.ts';
 import {
   createDetailSyntaxStyle,
   getDetailPalette,
@@ -136,6 +137,7 @@ interface Palette {
   focusBorderFg: string;
   detailBg: string;
   footerBg: string;
+  matchRowBg: string;
 }
 
 function getPalette(mode: 'dark' | 'light'): Palette {
@@ -156,6 +158,7 @@ function getPalette(mode: 'dark' | 'light'): Palette {
       focusBorderFg: '#2563eb',
       detailBg: '#fef2f2',
       footerBg: '#e5e7eb',
+      matchRowBg: '#fef9c3',
     };
   }
   return {
@@ -174,6 +177,7 @@ function getPalette(mode: 'dark' | 'light'): Palette {
     focusBorderFg: '#60a5fa',
     detailBg: '#2b1c1f',
     footerBg: '#1f2937',
+    matchRowBg: '#422006',
   };
 }
 
@@ -310,6 +314,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   let sandbox: SandboxState = { state: 'unknown' };
   let showSandboxDetail = false;
   let showHelp = false;
+  let findInputFocused = false;
   let statusMessage: string | null = null;
   let progress: IndexProgress = options.initiallyIndexing
     ? { indexed: 0, total: 0, done: false }
@@ -345,6 +350,19 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     flexShrink: 0,
     backgroundColor: palette.detailBg,
   });
+
+  const findBar = new BoxRenderable(renderer, {
+    height: 0,
+    width: '100%',
+    flexShrink: 0,
+    visible: false,
+    backgroundColor: palette.headerBg,
+  });
+  const findBarText = new TextRenderable(renderer, {
+    content: '',
+    fg: palette.headerFg,
+  });
+  findBar.add(findBarText);
 
   const bodyRow = new BoxRenderable(renderer, {
     flexDirection: 'row',
@@ -483,6 +501,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
   root.add(headerBar);
   root.add(sandboxDetailBox);
+  root.add(findBar);
   root.add(bodyRow);
   root.add(footerBar);
 
@@ -883,9 +902,31 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
+  const renderFindBar = () => {
+    if (!activeSessionId || !traceState.find.open) {
+      findBar.height = 0;
+      findBar.visible = false;
+      return;
+    }
+    findBar.height = 1;
+    findBar.visible = true;
+    const f = traceState.find;
+    const countText = f.query.trim()
+      ? f.matchIds.length > 0
+        ? `${f.matchIdx + 1}/${f.matchIds.length}`
+        : '0/0'
+      : '';
+    const cursor = findInputFocused ? '█' : '';
+    const hints = findInputFocused ? 'Enter: step  Esc: close' : 'n/N: next/prev  /: edit  Esc: close';
+    const maxW = Math.max(40, renderer.terminalWidth - 2);
+    const line = ` Find: ${f.query}${cursor}${countText ? `  ${countText}` : ''}  [${hints}]`;
+    findBarText.content = truncateText(line, maxW);
+  };
+
   const traceViewportHeight = () => {
     const detailH = showSandboxDetail && typeof sandboxDetailBox.height === 'number' ? sandboxDetailBox.height : 0;
-    return Math.max(1, renderer.terminalHeight - 3 - detailH);
+    const findH = activeSessionId && traceState.find.open ? 1 : 0;
+    return Math.max(1, renderer.terminalHeight - 3 - detailH - findH);
   };
 
   const renderTraceToolbar = () => {
@@ -923,14 +964,23 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       }
     }
 
+    const findQuery = traceState.find.open ? traceState.find.query.trim() : '';
+    const matchBg = RGBA.fromHex(palette.matchBg);
+    const matchFg = RGBA.fromHex(palette.matchFg);
+
     for (let i = 0; i < visibleRows.length; i++) {
       const row = visibleRows[i]!;
       const id = row.node.ev.id;
       const isSel = traceState.selectedId === id;
+      const isMatch = traceState.find.open && traceState.find.matchSet.has(id);
       const isErr = row.node.ev.kind === 'error' || row.node.failed;
-      const bg = isSel ? palette.selectedBg : undefined;
+      const bg = isSel ? palette.selectedBg : isMatch ? palette.matchRowBg : undefined;
       const fg = isErr ? palette.errorFg : palette.fg;
       const label = formatTraceRowText(row, paneWidth);
+      const content =
+        findQuery && label.toLowerCase().includes(findQuery.toLowerCase())
+          ? buildHighlightedStyledText(label, findQuery, RGBA.fromHex(fg), matchBg, matchFg)
+          : label;
 
       let entry = traceRowNodes.get(id);
       if (!entry) {
@@ -944,14 +994,14 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
             dispatchTrace({ type: 'selectId', id, scrollIntoView: false });
           },
         });
-        const text = new TextRenderable(renderer, { content: label, fg });
+        const text = new TextRenderable(renderer, { content, fg });
         box.add(text);
         traceRowsBox.add(box, i);
         entry = { box, text };
         traceRowNodes.set(id, entry);
       } else {
         entry.box.backgroundColor = bg ?? 'transparent';
-        entry.text.content = label;
+        entry.text.content = content;
         entry.text.fg = fg;
         if (traceRowsBox.getChildren()[i] !== entry.box) {
           traceRowsBox.add(entry.box, i);
@@ -1024,6 +1074,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       supportsImages: support.images,
       palette: detailPalette,
       syntaxStyle,
+      findQuery: traceState.find.open ? traceState.find.query : undefined,
       onToggleRaw: () => dispatchTrace({ type: 'toggleRaw' }),
       onToggleOutputExpand: () => {
         if (node) dispatchTrace({ type: 'toggleOutputExpand', id: node.ev.id });
@@ -1068,6 +1119,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     updatePaneVisibility();
     renderHeader();
     renderSandboxDetail();
+    renderFindBar();
     renderSessionsPane();
     renderTracePane();
     renderFooter();
@@ -1111,6 +1163,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     focus = 'trace';
     detailMode = 'step';
     contextRawById = new Map();
+    findInputFocused = false;
     loadedImages = [];
     traceState = createTraceState([]);
     renderAll();
@@ -1201,7 +1254,9 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     const prevRaw = traceState.rawMode;
     const prevFollow = traceState.follow;
     const prevExp = prevSel ? traceState.outputExpanded.get(prevSel) : undefined;
+    const prevFind = traceState.find;
     traceState = applyTraceAction(traceState, action, traceViewportHeight());
+    renderFindBar();
     renderTracePane();
     if (traceState.follow !== prevFollow) {
       renderHeader();
@@ -1210,7 +1265,11 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
     const nextSel = traceState.selectedId;
     const nextExp = nextSel ? traceState.outputExpanded.get(nextSel) : undefined;
-    if (nextSel !== prevSel || traceState.rawMode !== prevRaw || nextExp !== prevExp) {
+    const findChanged =
+      traceState.find.open !== prevFind.open ||
+      traceState.find.query !== prevFind.query ||
+      traceState.find.matchIdx !== prevFind.matchIdx;
+    if (nextSel !== prevSel || traceState.rawMode !== prevRaw || nextExp !== prevExp || findChanged) {
       if (nextSel !== prevSel) {
         loadedImages = [];
         void loadImagesForSelectedStep();
@@ -1431,6 +1490,9 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     return false;
   };
 
+  const isEscapeKey = (key: KeyInputLike) =>
+    key.name === 'escape' || key.name === 'esc' || key.sequence === '\x1b';
+
   const onKeypress = (key: KeyInputLike) => {
     if (key.ctrl && key.name === 'c') {
       options.onQuit();
@@ -1442,6 +1504,35 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
     if (progress.done && searchInputMode) {
       handleSearchInputKey(key);
+      return;
+    }
+
+    // In-session find input mode captures typed characters
+    if (progress.done && activeSessionId && traceState.find.open && findInputFocused) {
+      if (!key.ctrl && !key.meta && isEscapeKey(key)) {
+        findInputFocused = false;
+        dispatchTrace({ type: 'closeFind' });
+        return;
+      }
+      if (!key.ctrl && !key.meta && (key.name === 'return' || key.name === 'enter')) {
+        findInputFocused = false;
+        renderFindBar();
+        return;
+      }
+      if (!key.ctrl && !key.meta && key.name === 'backspace') {
+        dispatchTrace({ type: 'setFindQuery', query: traceState.find.query.slice(0, -1) });
+        return;
+      }
+      if (!key.ctrl && !key.meta) {
+        let ch: string | null = null;
+        if (key.name === 'space') ch = ' ';
+        else if (key.sequence && key.sequence.length === 1 && key.sequence >= ' ') ch = key.sequence;
+        else if (key.name && key.name.length === 1) ch = key.shift ? key.name.toUpperCase() : key.name;
+        if (ch !== null) {
+          dispatchTrace({ type: 'setFindQuery', query: `${traceState.find.query}${ch}` });
+          return;
+        }
+      }
       return;
     }
     if (!key.ctrl && !key.meta && key.name === 'q') {
@@ -1484,7 +1575,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       renderSandboxDetail();
       return;
     }
-    if (showSandboxDetail && !key.ctrl && !key.meta && key.name === 'escape') {
+    if (showSandboxDetail && !key.ctrl && !key.meta && isEscapeKey(key)) {
       showSandboxDetail = false;
       renderSandboxDetail();
       return;
@@ -1496,6 +1587,40 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
     if (!progress.done) return;
+
+    // In-session find navigation mode (after Enter)
+    if (activeSessionId && traceState.find.open && !key.ctrl && !key.meta) {
+      if (isEscapeKey(key)) {
+        dispatchTrace({ type: 'closeFind' });
+        return;
+      }
+      if (key.name === 'n' && !key.shift) {
+        dispatchTrace({ type: 'nextMatch' });
+        return;
+      }
+      if ((key.name === 'n' && key.shift) || key.sequence === 'N') {
+        dispatchTrace({ type: 'prevMatch' });
+        return;
+      }
+      if ((focus === 'trace' || focus === 'detail') && (key.name === '/' || key.sequence === '/')) {
+        findInputFocused = true;
+        renderFindBar();
+        return;
+      }
+    }
+
+    if (
+      activeSessionId &&
+      (focus === 'trace' || focus === 'detail') &&
+      !traceState.find.open &&
+      !key.ctrl &&
+      !key.meta &&
+      (key.name === '/' || key.sequence === '/')
+    ) {
+      findInputFocused = true;
+      dispatchTrace({ type: 'openFind' });
+      return;
+    }
 
     if (key.ctrl && !key.meta && key.name === 'k') {
       focus = 'sessions';

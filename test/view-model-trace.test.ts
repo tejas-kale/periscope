@@ -249,3 +249,67 @@ test('trace view-model: selectId expands collapsed ancestors and keeps them open
     ['turn-1', 'call-1', 'turn-2'],
   );
 });
+
+test('trace view-model: in-session find expands collapsed ancestors, steps n/N, and clears on close', () => {
+  const events: EventRow[] = [
+    makeEv({ id: 't1', seq: 1, kind: 'turn', text: 'First turn' }),
+    makeEv({ id: 'a1', seq: 2, parent_id: 't1', kind: 'text', text: 'Needle in turn 1' }),
+    makeEv({ id: 'tc1', seq: 3, parent_id: 't1', kind: 'tool_call', tool_name: 'Bash', text: '{"command":"ls"}' }),
+    makeEv({ id: 'tr1', seq: 4, parent_id: 'tc1', kind: 'tool_result', text: 'Needle in folded result' }),
+    makeEv({ id: 't2', seq: 5, kind: 'turn', text: 'Second turn' }),
+    makeEv({ id: 'a2', seq: 6, parent_id: 't2', kind: 'text', text: 'Another needle here' }),
+  ];
+
+  let state = createTraceState(events);
+  // Collapse both turns
+  state = applyTraceAction(state, { type: 'selectId', id: 't1' }, 20);
+  state = applyTraceAction(state, { type: 'toggleExpand' }, 20);
+  state = applyTraceAction(state, { type: 'selectId', id: 't2' }, 20);
+  state = applyTraceAction(state, { type: 'toggleExpand' }, 20);
+  assert.deepEqual(
+    getVisibleRows(state).map((r) => r.node.ev.id),
+    ['t1', 't2'],
+  );
+
+  // Open find and set query -> expands collapsed ancestors t1 & t2, maps folded tr1 -> tc1
+  state = applyTraceAction(state, { type: 'openFind' }, 20);
+  assert.equal(state.find.open, true);
+  state = applyTraceAction(state, { type: 'setFindQuery', query: 'needle' }, 20);
+  assert.deepEqual(state.find.matchIds, ['a1', 'tc1', 'a2']);
+  assert.equal(state.find.matchIdx, 0);
+  assert.equal(state.selectedId, 'a1');
+  assert.deepEqual(
+    getVisibleRows(state).map((r) => r.node.ev.id),
+    ['t1', 'a1', 'tc1', 't2', 'a2'],
+  );
+
+  // Step forward with nextMatch (n)
+  state = applyTraceAction(state, { type: 'nextMatch' }, 20);
+  assert.equal(state.find.matchIdx, 1);
+  assert.equal(state.selectedId, 'tc1');
+
+  state = applyTraceAction(state, { type: 'nextMatch' }, 20);
+  assert.equal(state.find.matchIdx, 2);
+  assert.equal(state.selectedId, 'a2');
+
+  // Wrap around forward
+  state = applyTraceAction(state, { type: 'nextMatch' }, 20);
+  assert.equal(state.find.matchIdx, 0);
+  assert.equal(state.selectedId, 'a1');
+
+  // Step backward with prevMatch (N) wraps to last
+  state = applyTraceAction(state, { type: 'prevMatch' }, 20);
+  assert.equal(state.find.matchIdx, 2);
+  assert.equal(state.selectedId, 'a2');
+
+  // Close find -> clears highlights and query, restores collapsed state (except selected t2)
+  state = applyTraceAction(state, { type: 'closeFind' }, 20);
+  assert.equal(state.find.open, false);
+  assert.equal(state.find.query, '');
+  assert.deepEqual(state.find.matchIds, []);
+  assert.equal(state.find.matchSet.size, 0);
+  assert.deepEqual(
+    getVisibleRows(state).map((r) => r.node.ev.id),
+    ['t1', 't2', 'a2'],
+  );
+});
