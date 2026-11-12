@@ -496,7 +496,7 @@ export function renderContextContent(opts: {
     paddingRight: 1,
     onMouseDown: () => onClose(),
   });
-  closeBtn.add(new TextRenderable(renderer, { content: '[Close (i)]', fg: palette.buttonFg }));
+  closeBtn.add(new TextRenderable(renderer, { content: '[Close (x)]', fg: palette.buttonFg }));
   headerRow.add(closeBtn);
   scrollBox.add(headerRow);
 

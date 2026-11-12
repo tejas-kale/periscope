@@ -385,6 +385,6 @@ export function keyToTraceAction(key: KeyInputLike): TraceAction | null {
   if (name === 'space') return { type: 'toggleExpand' };
   if (name === 'r') return { type: 'toggleRaw' };
   if (name === 'v') return { type: 'cycleShow' };
-  if (name === 'c') return { type: 'toggleCollapseAll' };
+  if (name === 'z') return { type: 'toggleCollapseAll' };
   return null;
 }

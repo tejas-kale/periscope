@@ -177,16 +177,16 @@ test('headless UI: Show filter, Collapse-all toggle, Stats view, and Context vie
       assert.match(backAllFrame, /Checking why build failed/);
       assert.match(backAllFrame, /Here is my analysis/);
 
-      // 2. Collapse-all toggle: 'c'
-      await mockInput.pressKey('c');
+      // 2. Collapse-all toggle: 'z'
+      await mockInput.pressKey('z');
       await renderOnce();
       const collapsedFrame = captureCharFrame();
       assert.match(collapsedFrame, /Inspect the build failure/);
       assert.doesNotMatch(collapsedFrame, /Checking why build failed/);
       assert.doesNotMatch(collapsedFrame, /Here is my analysis/);
 
-      // 'c' again -> expand all
-      await mockInput.pressKey('c');
+      // 'z' again -> expand all
+      await mockInput.pressKey('z');
       await renderOnce();
       const expandedFrame = captureCharFrame();
       assert.match(expandedFrame, /Checking why build failed/);
@@ -205,8 +205,8 @@ test('headless UI: Show filter, Collapse-all toggle, Stats view, and Context vie
       assert.match(statsFrame, /Tokens out:\s*500/);
       assert.match(statsFrame, /Bash/);
 
-      // 4. Context view: 'i'
-      await mockInput.pressKey('i');
+      // 4. Context view: 'x'
+      await mockInput.pressKey('x');
       await renderOnce();
       await new Promise((r) => setTimeout(r, 30));
       await renderOnce();
@@ -220,8 +220,8 @@ test('headless UI: Show filter, Collapse-all toggle, Stats view, and Context vie
       assert.match(ctxFrame, /System reminder/);
       assert.match(ctxFrame, /Always verify with npm test/);
 
-      // 'i' again -> back to step detail
-      await mockInput.pressKey('i');
+      // 'x' again -> back to step detail
+      await mockInput.pressKey('x');
       await renderOnce();
       const detailFrame = captureCharFrame();
       assert.doesNotMatch(detailFrame, /Injected Context/);
