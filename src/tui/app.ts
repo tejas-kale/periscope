@@ -1,17 +1,43 @@
 import {
   BoxRenderable,
+  RGBA,
   ScrollBoxRenderable,
+  StyledText,
+  TextAttributes,
   TextRenderable,
   type CliRenderer,
   type SyntaxStyle,
+  type TextChunk,
 } from '@opentui/core';
 import type { IndexProgress } from '../core/service.ts';
-import type { ChangeNotice, EventRow, PeriscopeApi, SandboxState, SessionRow } from '../core/types.ts';
+import type {
+  ChangeNotice,
+  EventRow,
+  PeriscopeApi,
+  SandboxState,
+  SearchHit,
+  SessionFilter,
+  SessionRow,
+} from '../core/types.ts';
 import type { ThemeOption } from '../cli/args.ts';
 import {
   formatSandboxDetail,
   formatSandboxStatus,
 } from '../view-model/sandbox-status.ts';
+import {
+  buildSearchResultItems,
+  cycleAgentFilter,
+  cycleDatePreset,
+  cycleHostFilter,
+  cycleStatusFilter,
+  dateRangeForPreset,
+  formatFilterBar,
+  hasActiveFilters,
+  parseDateRangeInput,
+  parseSnippet,
+  type DateRangePreset,
+  type SnippetSegment,
+} from '../view-model/session-filter.ts';
 import {
   applySessionListAction,
   buildSessionListItems,
@@ -61,7 +87,7 @@ import {
 export interface PeriscopeAppService
   extends Pick<
     PeriscopeApi,
-    'listSessions' | 'getEvents' | 'getRaw' | 'readImage' | 'sandboxStatus' | 'onChange' | 'onSandbox'
+    'listSessions' | 'getEvents' | 'getRaw' | 'readImage' | 'search' | 'sandboxStatus' | 'onChange' | 'onSandbox'
   > {
   onProgress?(cb: (p: IndexProgress) => void): () => void;
 }
@@ -96,6 +122,8 @@ interface Palette {
   mutedFg: string;
   liveFg: string;
   errorFg: string;
+  matchFg: string;
+  matchBg: string;
   borderFg: string;
   focusBorderFg: string;
   detailBg: string;
@@ -114,6 +142,8 @@ function getPalette(mode: 'dark' | 'light'): Palette {
       mutedFg: '#6b7280',
       liveFg: '#15803d',
       errorFg: '#b91c1c',
+      matchFg: '#713f12',
+      matchBg: '#fef08a',
       borderFg: '#d1d5db',
       focusBorderFg: '#2563eb',
       detailBg: '#fef2f2',
@@ -130,6 +160,8 @@ function getPalette(mode: 'dark' | 'light'): Palette {
     mutedFg: '#9ca3af',
     liveFg: '#4ade80',
     errorFg: '#f87171',
+    matchFg: '#fef08a',
+    matchBg: '#854d0e',
     borderFg: '#374151',
     focusBorderFg: '#60a5fa',
     detailBg: '#2b1c1f',
@@ -196,6 +228,36 @@ function decodeBase64DataUrl(dataUrl: string): Buffer | undefined {
   return Buffer.from(dataUrl.slice(idx + 1), 'base64');
 }
 
+function snippetToStyledText(segments: SnippetSegment[], palette: Palette, maxWidth: number): StyledText {
+  const prefix = '      ';
+  let remaining = Math.max(4, maxWidth - prefix.length);
+  const chunks: TextChunk[] = [
+    { __isChunk: true, text: prefix, fg: RGBA.fromHex(palette.mutedFg) },
+  ];
+  for (const seg of segments) {
+    if (remaining <= 0) break;
+    const text = seg.text.length > remaining ? `${seg.text.slice(0, Math.max(0, remaining - 1))}…` : seg.text;
+    remaining -= text.length;
+    if (!text) continue;
+    if (seg.match) {
+      chunks.push({
+        __isChunk: true,
+        text,
+        fg: RGBA.fromHex(palette.matchFg),
+        bg: RGBA.fromHex(palette.matchBg),
+        attributes: TextAttributes.BOLD,
+      });
+    } else {
+      chunks.push({
+        __isChunk: true,
+        text,
+        fg: RGBA.fromHex(palette.mutedFg),
+      });
+    }
+  }
+  return new StyledText(chunks);
+}
+
 /** Mount the Periscope terminal UI (session list + windowed trace tree + detail pane). */
 export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOptions): PeriscopeAppHandle {
   const adapter = options.adapter ?? createOpenTuiAdapter();
@@ -208,7 +270,20 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const clock = options.clock ?? Date.now;
 
   let sessions: SessionRow[] = [];
+  let sessionsById = new Map<string, SessionRow>();
   let listState: SessionListState = createSessionListState([]);
+  let filter: SessionFilter = {};
+  let datePreset: DateRangePreset = 'all';
+  let dateLabel = 'All';
+  let dateInputMode = false;
+  let dateInputText = '';
+  let dateInputError = '';
+  let searchQuery = '';
+  let searchInputMode = false;
+  let searchHits: SearchHit[] | null = null;
+  let searchCursorId: string | null = null;
+  let searchGen = 0;
+
   let activeSessionId: string | null = null;
   let traceState: TraceState = createTraceState([]);
   let focus: FocusPane = 'sessions';
@@ -275,12 +350,38 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     },
   });
 
+  const filterBar = new BoxRenderable(renderer, {
+    height: 0,
+    width: '100%',
+    flexShrink: 0,
+    backgroundColor: palette.headerBg,
+  });
+  const filterBarText = new TextRenderable(renderer, {
+    content: '',
+    fg: palette.mutedFg,
+  });
+  filterBar.add(filterBarText);
+
+  const searchBar = new BoxRenderable(renderer, {
+    height: 0,
+    width: '100%',
+    flexShrink: 0,
+    backgroundColor: palette.cursorBg,
+  });
+  const searchBarText = new TextRenderable(renderer, {
+    content: '',
+    fg: palette.fg,
+  });
+  searchBar.add(searchBarText);
+
   const listScroll = new ScrollBoxRenderable(renderer, {
     flexGrow: 1,
     width: '100%',
     scrollY: true,
     scrollX: false,
   });
+  sessionsPane.add(filterBar);
+  sessionsPane.add(searchBar);
   sessionsPane.add(listScroll);
 
   const tracePane = new BoxRenderable(renderer, {
@@ -462,12 +563,37 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
     const selected = listState.selectedSessionId
-      ? sessions.find((s) => s.id === listState.selectedSessionId)
+      ? sessionsById.get(listState.selectedSessionId)
       : undefined;
     if (selected) {
       footerText.content = ` Selected: ${selected.title || selected.id} (${formatAgent(selected.agent)}, ${formatHost(selected.host)})`;
     } else {
-      footerText.content = ' Navigate: ↑/↓/j/k  Toggle: Space/←/→  Quick-open: 1-9  Open: Enter';
+      footerText.content = ` ${formatFilterBar(filter, dateLabel)}  |  ↑/↓ Nav  Enter Open`;
+    }
+  };
+
+  const renderFilterAndSearchBars = (paneWidth: number) => {
+    const showFilter = progress.done && hasActiveFilters(filter);
+    if (showFilter) {
+      filterBar.height = 1;
+      filterBarText.content = truncateText(` ${formatFilterBar(filter, dateLabel)}`, paneWidth);
+    } else {
+      filterBar.height = 0;
+      filterBarText.content = '';
+    }
+
+    if (progress.done && dateInputMode) {
+      searchBar.height = 1;
+      const err = dateInputError ? ` [${dateInputError}]` : '';
+      searchBarText.content = truncateText(` Date (YYYY-MM-DD..YYYY-MM-DD): ${dateInputText}▏${err}`, paneWidth);
+    } else if (progress.done && (searchInputMode || searchQuery.length > 0)) {
+      searchBar.height = 1;
+      const countLabel = searchHits ? ` (${searchHits.length})` : '';
+      const cursor = searchInputMode ? '▏' : '';
+      searchBarText.content = truncateText(` Search: ${searchQuery}${cursor}${countLabel}`, paneWidth);
+    } else {
+      searchBar.height = 0;
+      searchBarText.content = '';
     }
   };
 
@@ -515,7 +641,12 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const renderSessionsPane = () => {
+    const paneWidth = activeSessionId
+      ? Math.max(20, Math.floor(renderer.terminalWidth * 0.26) - 2)
+      : Math.max(40, renderer.terminalWidth - 2);
+    renderFilterAndSearchBars(paneWidth);
     clearSessionRows();
+
     if (!progress.done) {
       const box = new BoxRenderable(renderer, { height: 1, width: '100%' });
       const label =
@@ -528,6 +659,81 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
 
+    const now = clock();
+
+    if (searchHits !== null && searchQuery.trim().length > 0) {
+      const items = buildSearchResultItems(searchHits, sessionsById);
+      if (items.length === 0) {
+        const box = new BoxRenderable(renderer, { height: 1, width: '100%' });
+        box.add(new TextRenderable(renderer, { content: ' No matches.', fg: palette.mutedFg }));
+        listScroll.add(box);
+        sessionRowNodes.push(box);
+        return;
+      }
+
+      if (!searchCursorId || !items.some((it) => it.session.id === searchCursorId)) {
+        searchCursorId = items[0]!.session.id;
+      }
+
+      for (const item of items) {
+        const isCursor = searchCursorId === item.session.id;
+        const isSelected = listState.selectedSessionId === item.session.id;
+        const bg = isSelected ? palette.selectedBg : isCursor ? palette.cursorBg : undefined;
+        const fg = item.session.status === 'live' ? palette.liveFg : palette.fg;
+
+        const onClickHit = () => {
+          focus = 'sessions';
+          searchInputMode = false;
+          searchCursorId = item.session.id;
+          listState = { ...listState, selectedSessionId: item.session.id, cursorKey: item.key };
+          options.onSelectSession?.(item.session);
+          void openSession(item.session, item.hit.event_id);
+        };
+
+        const rowBox = new BoxRenderable(renderer, {
+          height: 1,
+          width: '100%',
+          flexShrink: 0,
+          backgroundColor: bg,
+          onMouseDown: onClickHit,
+        });
+        rowBox.add(
+          new TextRenderable(renderer, {
+            content: formatSessionRowText(
+              {
+                kind: 'session',
+                key: item.key,
+                project: item.session.project ?? '(no project)',
+                session: item.session,
+                quickIndex: item.quickIndex,
+              },
+              now,
+              paneWidth,
+            ),
+            fg,
+          }),
+        );
+        listScroll.add(rowBox);
+        sessionRowNodes.push(rowBox);
+
+        const snipBox = new BoxRenderable(renderer, {
+          height: 1,
+          width: '100%',
+          flexShrink: 0,
+          backgroundColor: bg,
+          onMouseDown: onClickHit,
+        });
+        snipBox.add(
+          new TextRenderable(renderer, {
+            content: snippetToStyledText(parseSnippet(item.hit.snippet), palette, paneWidth),
+          }),
+        );
+        listScroll.add(snipBox);
+        sessionRowNodes.push(snipBox);
+      }
+      return;
+    }
+
     if (sessions.length === 0) {
       const box = new BoxRenderable(renderer, { height: 1, width: '100%' });
       box.add(new TextRenderable(renderer, { content: ' No sessions found.', fg: palette.mutedFg }));
@@ -536,11 +742,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
 
-    const now = clock();
     const items = buildSessionListItems(sessions, listState);
-    const paneWidth = activeSessionId
-      ? Math.max(20, Math.floor(renderer.terminalWidth * 0.26) - 2)
-      : Math.max(40, renderer.terminalWidth - 2);
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i]!;
@@ -760,7 +962,19 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     renderFooter();
   };
 
-  const openSession = async (session: SessionRow) => {
+  const openSession = async (session: SessionRow, focusEventId?: string | null) => {
+    if (activeSessionId === session.id && traceState.events.length > 0 && focusEventId) {
+      focus = 'trace';
+      traceState = applyTraceAction(
+        traceState,
+        { type: 'selectId', id: focusEventId, scrollIntoView: true },
+        traceViewportHeight(),
+      );
+      renderAll();
+      void loadImagesForSelectedStep();
+      return;
+    }
+
     activeSessionId = session.id;
     focus = 'trace';
     detailMode = 'step';
@@ -771,9 +985,46 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
     const events = await options.service.getEvents(session.id);
     if (disposed || activeSessionId !== session.id) return;
-    traceState = createTraceState(events);
+    traceState = createTraceState(events, focusEventId);
+    if (focusEventId) {
+      traceState = applyTraceAction(
+        traceState,
+        { type: 'selectId', id: focusEventId, scrollIntoView: true },
+        traceViewportHeight(),
+      );
+    }
     renderAll();
     void loadImagesForSelectedStep();
+  };
+
+  const openSearchHit = (hit: SearchHit) => {
+    const session = sessionsById.get(hit.session_id);
+    if (!session) return;
+    searchInputMode = false;
+    searchCursorId = session.id;
+    listState = { ...listState, selectedSessionId: session.id, cursorKey: `s:${session.id}` };
+    options.onSelectSession?.(session);
+    void openSession(session, hit.event_id);
+  };
+
+  const runSearch = async () => {
+    const gen = ++searchGen;
+    const q = searchQuery.trim();
+    if (!q) {
+      searchHits = null;
+      searchCursorId = null;
+      renderSessionsPane();
+      renderFooter();
+      return;
+    }
+    const hits = await options.service.search(q, filter);
+    if (disposed || gen !== searchGen) return;
+    searchHits = hits;
+    if (!searchCursorId || !hits.some((h) => h.session_id === searchCursorId)) {
+      searchCursorId = hits[0]?.session_id ?? null;
+    }
+    renderSessionsPane();
+    renderFooter();
   };
 
   const dispatchSessionList = (action: Parameters<typeof applySessionListAction>[2]) => {
@@ -845,14 +1096,23 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const runRefresh = async (changedIds?: string[]) => {
     if (disposed) return;
     const [nextSessions, nextSandbox] = await Promise.all([
-      options.service.listSessions({}),
+      options.service.listSessions(filter),
       options.service.sandboxStatus(),
     ]);
     if (disposed) return;
     sessions = nextSessions;
+    sessionsById = new Map(sessions.map((s) => [s.id, s]));
     sandbox = nextSandbox;
     if (!listState.cursorKey && sessions.length > 0) {
       listState = createSessionListState(sessions);
+    }
+    if (searchQuery.trim().length > 0) {
+      const gen = ++searchGen;
+      const hits = await options.service.search(searchQuery.trim(), filter);
+      if (disposed) return;
+      if (gen === searchGen) {
+        searchHits = hits;
+      }
     }
 
     let traceChanged = false;
@@ -915,9 +1175,141 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
+  const applyFilterChange = async () => {
+    await refresh();
+  };
+
+  const handleDateInputKey = (key: KeyInputLike) => {
+    const name = key.name ?? '';
+    if (name === 'escape' || name === 'esc' || key.sequence === '\x1b') {
+      dateInputMode = false;
+      dateInputError = '';
+      renderSessionsPane();
+      return;
+    }
+    if (name === 'return' || name === 'enter') {
+      const parsed = parseDateRangeInput(dateInputText);
+      if (!parsed) {
+        dateInputError = 'Use YYYY-MM-DD..YYYY-MM-DD';
+        renderSessionsPane();
+        return;
+      }
+      filter = { ...filter, from: parsed.from, to: parsed.to };
+      datePreset = 'custom';
+      dateLabel = parsed.label;
+      dateInputMode = false;
+      dateInputError = '';
+      void applyFilterChange();
+      return;
+    }
+    if (name === 'backspace') {
+      dateInputText = dateInputText.slice(0, -1);
+      dateInputError = '';
+      renderSessionsPane();
+      return;
+    }
+    if (!key.ctrl && !key.meta && key.sequence && key.sequence.length === 1 && key.sequence >= ' ') {
+      dateInputText += key.sequence;
+      dateInputError = '';
+      renderSessionsPane();
+    }
+  };
+
+  const handleSearchInputKey = (key: KeyInputLike) => {
+    const name = key.name ?? '';
+    if (name === 'escape' || name === 'esc' || key.sequence === '\x1b') {
+      searchQuery = '';
+      searchHits = null;
+      searchInputMode = false;
+      searchCursorId = null;
+      renderSessionsPane();
+      renderFooter();
+      return;
+    }
+    if (name === 'down') {
+      searchInputMode = false;
+      renderSessionsPane();
+      return;
+    }
+    if (name === 'return' || name === 'enter') {
+      searchInputMode = false;
+      if (searchHits && searchHits.length > 0) {
+        openSearchHit(searchHits[0]!);
+      } else if (searchQuery.trim().length > 0) {
+        void runSearch().then(() => {
+          if (!disposed && searchHits && searchHits.length > 0) {
+            openSearchHit(searchHits[0]!);
+          }
+        });
+      } else {
+        renderSessionsPane();
+      }
+      return;
+    }
+    if (name === 'backspace') {
+      searchQuery = searchQuery.slice(0, -1);
+      void runSearch();
+      return;
+    }
+    if (!key.ctrl && !key.meta && key.sequence && key.sequence.length === 1 && key.sequence >= ' ') {
+      searchQuery += key.sequence;
+      void runSearch();
+    }
+  };
+
+  const handleSearchListKey = (key: KeyInputLike): boolean => {
+    if (searchHits === null) return false;
+    const items = buildSearchResultItems(searchHits, sessionsById);
+    const name = key.name ?? '';
+    if (name === 'escape' || name === 'esc' || key.sequence === '\x1b') {
+      searchQuery = '';
+      searchHits = null;
+      searchCursorId = null;
+      renderSessionsPane();
+      renderFooter();
+      return true;
+    }
+    if (name === 'return' || name === 'enter') {
+      const target = items.find((it) => it.session.id === searchCursorId) ?? items[0];
+      if (target) openSearchHit(target.hit);
+      return true;
+    }
+    if (items.length === 0) return false;
+    const curIdx = Math.max(0, items.findIndex((it) => it.session.id === searchCursorId));
+    if (name === 'down' || (!key.shift && name === 'j')) {
+      searchCursorId = items[Math.min(items.length - 1, curIdx + 1)]!.session.id;
+      renderSessionsPane();
+      return true;
+    }
+    if (name === 'up' || (!key.shift && name === 'k')) {
+      searchCursorId = items[Math.max(0, curIdx - 1)]!.session.id;
+      renderSessionsPane();
+      return true;
+    }
+    if ((key.shift && name === 'g') || key.sequence === 'G') {
+      searchCursorId = items[items.length - 1]!.session.id;
+      renderSessionsPane();
+      return true;
+    }
+    if (!key.shift && name === 'g') {
+      searchCursorId = items[0]!.session.id;
+      renderSessionsPane();
+      return true;
+    }
+    return false;
+  };
+
   const onKeypress = (key: KeyInputLike) => {
     if (key.ctrl && key.name === 'c') {
       options.onQuit();
+      return;
+    }
+    if (progress.done && dateInputMode) {
+      handleDateInputKey(key);
+      return;
+    }
+    if (progress.done && searchInputMode) {
+      handleSearchInputKey(key);
       return;
     }
     if (!key.ctrl && !key.meta && key.name === 'q') {
@@ -936,6 +1328,15 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
     if (!progress.done) return;
 
+    if (key.ctrl && !key.meta && key.name === 'k') {
+      focus = 'sessions';
+      searchInputMode = true;
+      renderHeader();
+      updatePaneBorders();
+      renderSessionsPane();
+      return;
+    }
+
     if (!key.ctrl && !key.meta && key.name === 'tab' && activeSessionId) {
       const order: FocusPane[] = ['sessions', 'trace', 'detail'];
       const idx = order.indexOf(focus);
@@ -947,7 +1348,14 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
     // 1-9 quick-open works across panes
     if (!key.ctrl && !key.meta && key.name && /^[1-9]$/.test(key.name)) {
-      dispatchSessionList({ type: 'quickOpen', index: Number(key.name) });
+      const n = Number(key.name);
+      if (searchHits !== null && searchQuery.trim().length > 0) {
+        const items = buildSearchResultItems(searchHits, sessionsById);
+        const target = items[n - 1];
+        if (target) openSearchHit(target.hit);
+        return;
+      }
+      dispatchSessionList({ type: 'quickOpen', index: n });
       return;
     }
 
@@ -964,6 +1372,53 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
 
     if (focus === 'sessions') {
+      if (!key.ctrl && !key.meta) {
+        if (key.sequence === '/' || key.name === '/') {
+          searchInputMode = true;
+          renderSessionsPane();
+          return;
+        }
+        if (!key.shift && key.name === 'a') {
+          filter = { ...filter, agent: cycleAgentFilter(filter.agent) };
+          void applyFilterChange();
+          return;
+        }
+        if ((!key.shift && key.name === 'o') || (key.shift && key.name === 'h') || key.sequence === 'H') {
+          filter = { ...filter, host: cycleHostFilter(filter.host) };
+          void applyFilterChange();
+          return;
+        }
+        if (!key.shift && key.name === 's') {
+          filter = { ...filter, status: cycleStatusFilter(filter.status) };
+          void applyFilterChange();
+          return;
+        }
+        if (!key.shift && key.name === 'd') {
+          datePreset = cycleDatePreset(datePreset);
+          dateLabel = datePreset === 'all' ? 'All' : datePreset;
+          const range = dateRangeForPreset(datePreset, clock());
+          filter = { ...filter, from: range.from, to: range.to };
+          void applyFilterChange();
+          return;
+        }
+        if ((key.shift && key.name === 'd') || key.sequence === 'D') {
+          dateInputMode = true;
+          dateInputText = '';
+          dateInputError = '';
+          renderSessionsPane();
+          return;
+        }
+        if (!key.shift && key.name === 'c') {
+          filter = {};
+          datePreset = 'all';
+          dateLabel = 'All';
+          void applyFilterChange();
+          return;
+        }
+      }
+      if (searchHits !== null && searchQuery.trim().length > 0) {
+        if (handleSearchListKey(key)) return;
+      }
       const action = keyToSessionListAction(key);
       if (action) dispatchSessionList(action);
       return;

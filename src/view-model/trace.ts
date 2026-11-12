@@ -290,8 +290,13 @@ export function applyTraceAction(
       const id = visibleId(state.tree, action.id);
       let nextRows = rows;
       let nextIndex = rowIndex;
+      let nextExpanded = state.expanded;
       if (!nextIndex.has(id)) {
-        const rebuilt = rebuildRows(state.tree, state.show, state.expanded, state.collapseAll, id);
+        nextExpanded = new Map(state.expanded);
+        for (let p = state.tree.byId.get(id)?.parent; p; p = p.parent) {
+          if (nextExpanded.get(p.ev.id) === false) nextExpanded.set(p.ev.id, true);
+        }
+        const rebuilt = rebuildRows(state.tree, state.show, nextExpanded, state.collapseAll, id);
         nextRows = rebuilt.rows;
         nextIndex = rebuilt.rowIndex;
       }
@@ -303,6 +308,7 @@ export function applyTraceAction(
           : clampScrollForIndex(idx, state.scrollOffset, vp);
       return {
         ...state,
+        expanded: nextExpanded,
         rows: nextRows,
         rowIndex: nextIndex,
         selectedId: id,
