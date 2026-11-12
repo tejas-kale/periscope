@@ -92,6 +92,25 @@ test('detail view-model: long ANSI output collapses at 40 lines and expands on d
   const ansiExpanded = expanded.blocks.find((b) => b.kind === 'ansi');
   assert.ok(ansiExpanded && ansiExpanded.kind === 'ansi');
   assert.equal(ansiExpanded.text.split('\n').length, 60);
+
+  // When findQuery matches past line 40, output auto-expands
+  const withTailMatch = buildDetailModel(node, {
+    rawMode: false,
+    outputExpanded: false,
+    findQuery: 'line 55',
+  });
+  assert.equal(withTailMatch.outputExpanded, true);
+  const ansiTail = withTailMatch.blocks.find((b) => b.kind === 'ansi');
+  assert.ok(ansiTail && ansiTail.kind === 'ansi');
+  assert.equal(ansiTail.text.split('\n').length, 60);
+
+  // When findQuery only matches in the first 40 lines, output stays collapsed
+  const withHeadMatch = buildDetailModel(node, {
+    rawMode: false,
+    outputExpanded: false,
+    findQuery: 'line 12',
+  });
+  assert.equal(withHeadMatch.outputExpanded, false);
 });
 
 test('detail view-model: extractImageRefs finds Claude base64 and Antigravity media URIs', () => {

@@ -446,3 +446,28 @@ test('sandbox ingests sandbox sessions alongside Mac sessions and reports error 
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('watcher error or removed watched directory does not crash service', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'periscope-watch-err-'));
+  try {
+    const claudeRoot = path.join(tmp, 'claude');
+    fs.mkdirSync(path.join(claudeRoot, 'proj'), { recursive: true });
+    const service = new PeriscopeService({
+      dbPath: ':memory:',
+      roots: [{ agent: 'claude' as const, dir: claudeRoot }],
+      agyMetadata: path.join(tmp, 'nonexistent.json'),
+      claudeSessionsDir: path.join(tmp, 'no-sessions'),
+      sandboxEnabled: false,
+      watchEnsureMs: 20,
+    });
+    await service.start();
+    try {
+      fs.rmSync(claudeRoot, { recursive: true, force: true });
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      await service.stop();
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -212,12 +212,13 @@ function buildToolArgBlocks(ev: EventRow): DetailBlock[] {
 
 function buildOutputBlocks(
   text: string,
-  opts: { rawMode: boolean; outputExpanded: boolean },
+  opts: { rawMode: boolean; outputExpanded: boolean; findQuery?: string },
 ): {
   blocks: DetailBlock[];
   canToggleRaw: boolean;
   hasCollapsibleOutput: boolean;
   totalOutputLines: number;
+  outputExpanded: boolean;
 } {
   if (!text) {
     return {
@@ -225,6 +226,7 @@ function buildOutputBlocks(
       canToggleRaw: false,
       hasCollapsibleOutput: false,
       totalOutputLines: 0,
+      outputExpanded: opts.outputExpanded,
     };
   }
   const trimmed = text.trim();
@@ -241,7 +243,15 @@ function buildOutputBlocks(
   const lines = sourceText.split('\n');
   const totalOutputLines = lines.length;
   const hasCollapsibleOutput = totalOutputLines > COLLAPSE_LINES;
-  const collapsed = hasCollapsibleOutput && !opts.outputExpanded;
+  const q = opts.findQuery?.trim();
+  const matchInHiddenTail = Boolean(
+    q &&
+      hasCollapsibleOutput &&
+      !opts.outputExpanded &&
+      lines.slice(COLLAPSE_LINES).join('\n').toLowerCase().includes(q.toLowerCase()),
+  );
+  const effectiveExpanded = opts.outputExpanded || matchInHiddenTail;
+  const collapsed = hasCollapsibleOutput && !effectiveExpanded;
   const shown = collapsed ? lines.slice(0, COLLAPSE_LINES).join('\n') : sourceText;
   const md = !json && looksLikeMarkdown(text);
 
@@ -251,6 +261,7 @@ function buildOutputBlocks(
       canToggleRaw: false,
       hasCollapsibleOutput,
       totalOutputLines,
+      outputExpanded: effectiveExpanded,
     };
   }
   if (looksLikeDiff(text)) {
@@ -259,6 +270,7 @@ function buildOutputBlocks(
       canToggleRaw: false,
       hasCollapsibleOutput,
       totalOutputLines,
+      outputExpanded: effectiveExpanded,
     };
   }
   if (md) {
@@ -267,6 +279,7 @@ function buildOutputBlocks(
       canToggleRaw: true,
       hasCollapsibleOutput,
       totalOutputLines,
+      outputExpanded: effectiveExpanded,
     };
   }
   if (hasAnsi(text)) {
@@ -275,6 +288,7 @@ function buildOutputBlocks(
       canToggleRaw: false,
       hasCollapsibleOutput,
       totalOutputLines,
+      outputExpanded: effectiveExpanded,
     };
   }
   return {
@@ -282,13 +296,14 @@ function buildOutputBlocks(
     canToggleRaw: false,
     hasCollapsibleOutput,
     totalOutputLines,
+    outputExpanded: effectiveExpanded,
   };
 }
 
 /** Build the pure detail-pane view model for a selected TreeNode. */
 export function buildDetailModel(
   node: TreeNode | null,
-  opts: { rawMode: boolean; outputExpanded: boolean },
+  opts: { rawMode: boolean; outputExpanded: boolean; findQuery?: string },
 ): DetailModel {
   if (!node) {
     return {
@@ -354,6 +369,7 @@ export function buildDetailModel(
     let canToggleRaw = false;
     let hasCollapsibleOutput = false;
     let totalOutputLines = 0;
+    let outputExpanded = opts.outputExpanded;
 
     for (const r of results) {
       blocks.push({
@@ -368,10 +384,12 @@ export function buildDetailModel(
         hasCollapsibleOutput = true;
         totalOutputLines = Math.max(totalOutputLines, out.totalOutputLines);
       }
+      if (out.outputExpanded) outputExpanded = true;
     }
 
     return {
       ...base,
+      outputExpanded,
       canToggleRaw,
       hasCollapsibleOutput,
       totalOutputLines,

@@ -42,6 +42,8 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
   { section: 'Trace Tree', keys: 'r', description: 'Toggle raw / rendered Markdown' },
   { section: 'Trace Tree', keys: 'e', description: 'Expand / collapse long tool output' },
   { section: 'Trace Tree', keys: 'f', description: 'Toggle live follow mode' },
+  { section: 'Trace Tree', keys: '/', description: 'In-session find in trace/detail' },
+  { section: 'Trace Tree', keys: 'n / N', description: 'Next / previous find match' },
   { section: 'Trace Tree', keys: 'v / z', description: 'Cycle step filter / collapse-all steps' },
   { section: 'Trace Tree', keys: 's / x', description: 'Toggle session stats / context view' },
 

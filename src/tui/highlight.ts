@@ -1,5 +1,9 @@
 import { RGBA, StyledText, TextAttributes, type TextChunk } from '@opentui/core';
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Split `text` into TextChunks highlighting case-insensitive occurrences of `query`. */
 export function highlightTextChunks(
   text: string,
@@ -10,7 +14,7 @@ export function highlightTextChunks(
   baseBg?: RGBA,
   baseAttrs: number = TextAttributes.NONE,
 ): TextChunk[] {
-  const needle = query.trim().toLowerCase();
+  const needle = query.trim();
   if (!needle || !text) {
     return [
       {
@@ -23,26 +27,17 @@ export function highlightTextChunks(
     ];
   }
 
-  const lower = text.toLowerCase();
+  const re = new RegExp(escapeRegExp(needle), 'gi');
   const chunks: TextChunk[] = [];
   let pos = 0;
+  let m: RegExpExecArray | null;
 
-  while (pos < text.length) {
-    const idx = lower.indexOf(needle, pos);
-    if (idx === -1) {
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) break;
+    if (m.index > pos) {
       chunks.push({
         __isChunk: true,
-        text: text.slice(pos),
-        fg: baseFg,
-        bg: baseBg,
-        attributes: baseAttrs,
-      });
-      break;
-    }
-    if (idx > pos) {
-      chunks.push({
-        __isChunk: true,
-        text: text.slice(pos, idx),
+        text: text.slice(pos, m.index),
         fg: baseFg,
         bg: baseBg,
         attributes: baseAttrs,
@@ -50,12 +45,22 @@ export function highlightTextChunks(
     }
     chunks.push({
       __isChunk: true,
-      text: text.slice(idx, idx + needle.length),
+      text: m[0],
       fg: matchFg,
       bg: matchBg,
       attributes: baseAttrs | TextAttributes.BOLD,
     });
-    pos = idx + needle.length;
+    pos = m.index + m[0].length;
+  }
+
+  if (pos < text.length) {
+    chunks.push({
+      __isChunk: true,
+      text: text.slice(pos),
+      fg: baseFg,
+      bg: baseBg,
+      attributes: baseAttrs,
+    });
   }
 
   return chunks;

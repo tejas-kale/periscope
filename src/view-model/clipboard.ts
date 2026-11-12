@@ -25,7 +25,7 @@ export interface CopyFallbackOptions {
 }
 
 export interface CopyResult {
-  method: 'osc52' | 'tempfile';
+  method: 'osc52' | 'tempfile' | 'error';
   filePath?: string;
   statusMessage: string;
 }
@@ -126,13 +126,22 @@ export function copyWithFallback(text: string, opts: CopyFallbackOptions): CopyR
   const dir = opts.tmpDir ?? os.tmpdir();
   const token = crypto.randomBytes(4).toString('hex');
   const filePath = path.join(dir, `periscope-copy-${Date.now()}-${token}.txt`);
-  fs.writeFileSync(filePath, text, 'utf8');
 
   const reason = !opts.osc52Supported
     ? 'OSC 52 unsupported'
     : byteLen > maxBytes
       ? 'Too large for OSC 52'
       : 'Clipboard failed';
+
+  try {
+    fs.writeFileSync(filePath, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      method: 'error',
+      statusMessage: `${reason} — failed to write ${opts.label}: ${msg}`,
+    };
+  }
 
   return {
     method: 'tempfile',

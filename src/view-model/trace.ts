@@ -147,7 +147,12 @@ export function createTraceState(events: EventRow[], focusEventId?: string | nul
   };
 }
 
-/** Merge newly arrived events into the trace; when follow is on, select and scroll to the newest row. */
+/**
+ * Merge newly arrived events into the trace; when follow is on, select and scroll to the newest row.
+ * Rebuilds the tree cleanly via `buildTree` because `mergeEvents` can update existing rows in the
+ * refetch window, child events may link to existing ancestors, and `buildTree` aggregates
+ * descendant tokens/duration/failure status up to ancestor nodes while keeping TraceState immutable.
+ */
 export function appendTraceEvents(
   state: TraceState,
   fresh: EventRow[],
@@ -157,17 +162,19 @@ export function appendTraceEvents(
   const events = mergeEvents(state.events, fresh);
   const tree = buildTree(events);
   let find = state.find;
+  let built: { rows: Row[]; rowIndex: Map<string, number> };
+
   if (find.open && find.query.trim()) {
     const computed = computeMatchesForTree(events, tree, find.query);
-    const { rows: preRows, rowIndex: preIndex } = rebuildRows(
+    built = rebuildRows(
       tree,
       state.show,
       state.expanded,
       state.collapseAll,
-      state.selectedId,
+      state.follow ? null : state.selectedId,
       computed.matchIds,
     );
-    const visibleMatches = computed.matchIds.filter((id) => preIndex.has(id));
+    const visibleMatches = computed.matchIds.filter((id) => built.rowIndex.has(id));
     const matchIdx = visibleMatches.length
       ? Math.min(find.matchIdx, visibleMatches.length - 1)
       : 0;
@@ -178,31 +185,17 @@ export function appendTraceEvents(
       totalHits: computed.totalHits,
       matchIdx,
     };
-    const selectedId =
-      state.selectedId && preIndex.has(visibleId(tree, state.selectedId))
-        ? visibleId(tree, state.selectedId)
-        : preRows.length > 0
-          ? preRows[0]!.node.ev.id
-          : null;
-    const maxScroll = Math.max(0, preRows.length - 1);
-    return {
-      ...state,
-      events,
+  } else {
+    built = rebuildRows(
       tree,
-      rows: preRows,
-      rowIndex: preIndex,
-      selectedId,
-      scrollOffset: Math.min(state.scrollOffset, maxScroll),
-      find,
-    };
+      state.show,
+      state.expanded,
+      state.collapseAll,
+      state.follow ? null : state.selectedId,
+    );
   }
-  const { rows, rowIndex } = rebuildRows(
-    tree,
-    state.show,
-    state.expanded,
-    state.collapseAll,
-    state.follow ? null : state.selectedId,
-  );
+
+  const { rows, rowIndex } = built;
   if (state.follow && rows.length > 0) {
     const lastIdx = rows.length - 1;
     return {
@@ -213,6 +206,7 @@ export function appendTraceEvents(
       rowIndex,
       selectedId: rows[lastIdx]!.node.ev.id,
       scrollOffset: clampScrollForIndex(lastIdx, state.scrollOffset, Math.max(1, viewportHeight)),
+      find,
     };
   }
   const selectedId =
@@ -230,6 +224,7 @@ export function appendTraceEvents(
     rowIndex,
     selectedId,
     scrollOffset: Math.min(state.scrollOffset, maxScroll),
+    find,
   };
 }
 

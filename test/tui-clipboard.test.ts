@@ -318,3 +318,175 @@ test('headless UI clipboard: falls back to temp file in os.tmpdir() when OSC 52 
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('headless UI clipboard: shows full temp file path at 80 columns', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'periscope-tui-clip-80-'));
+  const createdTempFiles: string[] = [];
+  try {
+    const claudeDir = path.join(tmp, 'claude', 'proj-80');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const sessionId = '66666666-6666-6666-6666-666666666666';
+    const filePath = path.join(claudeDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        cwd: '/work/proj-80',
+        timestamp: '2026-06-01T12:00:00Z',
+        message: { role: 'user', content: 'Copy me at 80 cols' },
+      }) + '\n',
+    );
+
+    const service = new PeriscopeService({
+      dbPath: ':memory:',
+      roots: [{ agent: 'claude', dir: path.join(tmp, 'claude') }],
+      agyMetadata: path.join(tmp, 'nonexistent.json'),
+      claudeSessionsDir: path.join(tmp, 'no-sessions'),
+      sandboxEnabled: false,
+    });
+
+    const { createTestRenderer } = await import('@opentui/core/testing');
+    const { renderer, mockInput, renderOnce, captureCharFrame } = await createTestRenderer({
+      width: 80,
+      height: 24,
+    });
+    (renderer as unknown as { _capabilities: Record<string, unknown> })._capabilities = {
+      ...(renderer.capabilities ?? {}),
+      osc52: false,
+    };
+
+    const handle = mountPeriscopeApp(renderer, {
+      service,
+      adapter: createOpenTuiAdapter(),
+      theme: 'dark',
+      initiallyIndexing: true,
+      onQuit: () => {},
+    });
+
+    try {
+      await service.start();
+      await handle.refresh();
+      await renderOnce();
+
+      await mockInput.pressArrow('down');
+      await mockInput.pressEnter();
+      await new Promise((r) => setTimeout(r, 30));
+      await renderOnce();
+
+      await mockInput.pressKey('y');
+      await renderOnce();
+
+      const frame = captureCharFrame();
+      assert.match(frame, /OSC 52 unsupported/);
+      const writtenPath = extractTempPathFromFrame(frame);
+      assert.ok(writtenPath, `expected temp file path in 80-col footer, got:\n${frame}`);
+      createdTempFiles.push(writtenPath);
+      assert.ok(writtenPath.endsWith('.txt'), `expected full .txt path, got ${writtenPath}`);
+      assert.equal(fs.readFileSync(writtenPath, 'utf8'), 'Copy me at 80 cols');
+    } finally {
+      handle.dispose();
+      await service.stop();
+      renderer.destroy();
+    }
+  } finally {
+    for (const f of createdTempFiles) {
+      fs.rmSync(f, { force: true });
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('headless UI safety: rejected service calls in openSession and refresh do not cause unhandled rejections', async () => {
+  const { createTestRenderer } = await import('@opentui/core/testing');
+  const { renderer, mockInput, renderOnce } = await createTestRenderer({
+    width: 100,
+    height: 24,
+  });
+
+  const fakeSession = {
+    id: 'n:fail-sess',
+    agent: 'claude' as const,
+    host: 'mac' as const,
+    project: 'proj-fail',
+    title: 'Fail Session',
+    source_path: '/tmp/fail.jsonl',
+    started_at: 1000,
+    last_activity_at: 2000,
+    status: 'idle' as const,
+    total_tokens_in: 0,
+    total_tokens_out: 0,
+  };
+
+  let failList = false;
+  const fakeService = {
+    async listSessions() {
+      if (failList) throw new Error('listSessions boom');
+      return [fakeSession];
+    },
+    async getEvents() {
+      throw new Error('getEvents boom');
+    },
+    async getRaw() {
+      throw new Error('getRaw boom');
+    },
+    async search() {
+      throw new Error('search boom');
+    },
+    async sandboxStatus() {
+      return { state: 'disabled' as const };
+    },
+    async readImage() {
+      return null;
+    },
+    onChange() {
+      return () => {};
+    },
+    onProgress() {
+      return () => {};
+    },
+    onLive() {
+      return () => {};
+    },
+    onSandbox() {
+      return () => {};
+    },
+  };
+
+  const unhandled: unknown[] = [];
+  const onUnhandled = (err: unknown) => {
+    unhandled.push(err);
+  };
+  process.on('unhandledRejection', onUnhandled);
+
+  const handle = mountPeriscopeApp(renderer, {
+    service: fakeService as unknown as PeriscopeService,
+    adapter: createOpenTuiAdapter(),
+    theme: 'dark',
+    initiallyIndexing: false,
+    onQuit: () => {},
+  });
+
+  try {
+    await handle.refresh();
+    await renderOnce();
+
+    // Trigger openSession via Enter (calls getEvents which rejects)
+    await mockInput.pressArrow('down');
+    await mockInput.pressEnter();
+    await new Promise((r) => setTimeout(r, 30));
+    await renderOnce();
+
+    // Trigger runRefresh rejection
+    failList = true;
+    await handle.refresh();
+    await new Promise((r) => setTimeout(r, 30));
+    await renderOnce();
+
+    assert.equal(unhandled.length, 0, `unexpected unhandled rejections: ${String(unhandled[0])}`);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    handle.dispose();
+    renderer.destroy();
+  }
+});

@@ -82,9 +82,17 @@ test('layout view-model: detail zoom gives detail 100% width and toggles back', 
 test('keymap view-model: lists every shortcut and formats lines within width', async () => {
   const { KEY_BINDINGS, formatHelpLines } = await import('../src/view-model/keymap.ts');
   const keys = KEY_BINDINGS.map((b) => b.keys).join(' ');
-  for (const required of ['Tab', '[', ']', '=', 'z', 't', '?', 'q', 'Ctrl+C', 'S', '1-9', 'r', 'e', 'Enter', 'Esc']) {
+  for (const required of ['Tab', '[', ']', '=', 'z', 't', '?', 'q', 'Ctrl+C', 'S', '1-9', 'r', 'e', 'Enter', 'Esc', '/', 'n / N', 'f']) {
     assert.ok(keys.includes(required), `missing shortcut ${required} in KEY_BINDINGS`);
   }
+  assert.ok(
+    KEY_BINDINGS.some((b) => b.section === 'Trace Tree' && b.keys === '/'),
+    'missing / in Trace Tree section',
+  );
+  assert.ok(
+    KEY_BINDINGS.some((b) => b.section === 'Trace Tree' && b.keys === 'n / N'),
+    'missing n / N in Trace Tree section',
+  );
 
   const lines80 = formatHelpLines(68);
   assert.ok(lines80.length > 10);

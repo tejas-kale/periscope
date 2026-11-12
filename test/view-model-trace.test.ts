@@ -313,3 +313,25 @@ test('trace view-model: in-session find expands collapsed ancestors, steps n/N, 
     ['t1', 't2', 'a2'],
   );
 });
+
+test('trace view-model: appendTraceEvents still follows tail when find.open is true', () => {
+  const events: EventRow[] = [
+    makeEv({ id: 't1', seq: 1, kind: 'turn', text: 'turn 1' }),
+    makeEv({ id: 'a1', seq: 2, parent_id: 't1', kind: 'text', text: 'first needle' }),
+  ];
+
+  let state = createTraceState(events);
+  state = applyTraceAction(state, { type: 'openFind' }, 20);
+  state = applyTraceAction(state, { type: 'setFindQuery', query: 'needle' }, 20);
+  state = applyTraceAction(state, { type: 'toggleFollow' }, 20);
+  assert.equal(state.follow, true);
+  assert.equal(state.find.open, true);
+
+  state = appendTraceEvents(
+    state,
+    [makeEv({ id: 'a2', seq: 3, parent_id: 't1', kind: 'text', text: 'second needle' })],
+    20,
+  );
+  assert.equal(state.selectedId, 'a2');
+  assert.deepEqual(state.find.matchIds, ['a1', 'a2']);
+});

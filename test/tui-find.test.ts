@@ -230,3 +230,112 @@ test('headless UI find: / opens find bar, expands collapsed ancestors, highlight
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('highlightTextChunks handles characters whose lowercase length differs (e.g. İ) without index drift', async () => {
+  const { RGBA } = await import('@opentui/core');
+  const { highlightTextChunks } = await import('../src/tui/highlight.ts');
+  const baseFg = RGBA.fromHex('#ffffff');
+  const matchBg = RGBA.fromHex('#facc15');
+  const matchFg = RGBA.fromHex('#000000');
+
+  const chunks = highlightTextChunks('İstanbul needle tail', 'needle', baseFg, matchBg, matchFg);
+  assert.equal(chunks.map((c) => c.text).join(''), 'İstanbul needle tail');
+  const matchChunk = chunks.find((c) => c.bg === matchBg);
+  assert.ok(matchChunk);
+  assert.equal(matchChunk.text, 'needle');
+});
+
+test('renderDetailContent preserves diff line colours (+ green, - red) when highlighting find matches', async () => {
+  const { ScrollBoxRenderable } = await import('@opentui/core');
+  const { createTestRenderer } = await import('@opentui/core/testing');
+  const { createDetailSyntaxStyle, getDetailPalette, renderDetailContent } = await import(
+    '../src/tui/detail-pane.ts'
+  );
+  const { buildDetailModel } = await import('../src/view-model/detail.ts');
+  const { buildTree } = await import('../src/view-model/tree.ts');
+
+  const { renderer, renderOnce, captureSpans } = await createTestRenderer({ width: 100, height: 24 });
+  const palette = getDetailPalette('dark');
+  const syntaxStyle = createDetailSyntaxStyle(renderer, 'dark');
+  const scrollBox = new ScrollBoxRenderable(renderer, { width: '100%', height: '100%' });
+  renderer.root.add(scrollBox);
+
+  try {
+    const tree = buildTree([
+      {
+        id: 'e1',
+        session_id: 's1',
+        seq: 1,
+        parent_id: null,
+        kind: 'tool_call',
+        role: null,
+        ts: 1000,
+        duration_ms: null,
+        tokens_in: null,
+        tokens_out: null,
+        tool_name: 'Edit',
+        text: JSON.stringify({
+          file_path: 'src/a.ts',
+          old_string: 'const oldNeedle = 1;',
+          new_string: 'const newNeedle = 2;',
+        }),
+      },
+    ]);
+    const model = buildDetailModel(tree.roots[0]!, {
+      rawMode: false,
+      outputExpanded: false,
+      findQuery: 'Needle',
+    });
+
+    renderDetailContent({
+      renderer,
+      scrollBox,
+      model,
+      images: [],
+      supportsImages: false,
+      palette,
+      syntaxStyle,
+      findQuery: 'Needle',
+      onToggleRaw: () => {},
+      onToggleOutputExpand: () => {},
+    });
+    await renderOnce();
+
+    const spansResult = captureSpans();
+    const colorMatches = (fg: unknown, hex: string): boolean => {
+      if (!fg || typeof fg !== 'object') return false;
+      const c = fg as { toHex?: () => string; r?: number; g?: number; b?: number };
+      if (typeof c.toHex === 'function' && c.toHex().toLowerCase().startsWith(hex.toLowerCase())) {
+        return true;
+      }
+      if (c.r != null && c.g != null && c.b != null) {
+        const toByte = (v: number) =>
+          v <= 1 && c.r! <= 1 && c.g! <= 1 && c.b! <= 1 ? Math.round(v * 255) : Math.round(v);
+        const got =
+          '#' +
+          [toByte(c.r), toByte(c.g), toByte(c.b)]
+            .map((n) => n.toString(16).padStart(2, '0'))
+            .join('');
+        return got.toLowerCase() === hex.toLowerCase();
+      }
+      return false;
+    };
+
+    const allSpans = spansResult.lines.flatMap((l) => l.spans);
+    assert.ok(
+      allSpans.some((s) => s.text.includes('const old') && colorMatches(s.fg, palette.removedSign)),
+      'Expected removed diff line to keep removedSign (red) colour',
+    );
+    assert.ok(
+      allSpans.some((s) => s.text.includes('const new') && colorMatches(s.fg, palette.addedSign)),
+      'Expected added diff line to keep addedSign (green) colour',
+    );
+    assert.ok(
+      hasHighlightedSpan(spansResult, 'Needle', palette.matchBg),
+      'Expected Needle match to be highlighted in diff',
+    );
+  } finally {
+    syntaxStyle.destroy();
+    renderer.destroy();
+  }
+});

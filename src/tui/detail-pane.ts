@@ -355,9 +355,33 @@ export function renderDetailContent(opts: RenderDetailOptions): void {
           );
         }
         if (hasMatch(block.diffText)) {
+          const addedFg = RGBA.fromHex(palette.addedSign);
+          const removedFg = RGBA.fromHex(palette.removedSign);
+          const addedBg = RGBA.fromHex(palette.addedBg);
+          const removedBg = RGBA.fromHex(palette.removedBg);
+          const mutedFg = RGBA.fromHex(palette.mutedFg);
+          const diffLines = block.diffText.split('\n');
+          const chunks = diffLines.flatMap((line, idx) => {
+            let lineFg = baseFg;
+            let lineBg: RGBA | undefined;
+            if (line.startsWith('+') && !line.startsWith('+++')) {
+              lineFg = addedFg;
+              lineBg = addedBg;
+            } else if (line.startsWith('-') && !line.startsWith('---')) {
+              lineFg = removedFg;
+              lineBg = removedBg;
+            } else if (line.startsWith('@@') || line.startsWith('---') || line.startsWith('+++')) {
+              lineFg = mutedFg;
+            }
+            const lineChunks = highlightTextChunks(line, query, lineFg, matchBg, matchFg, lineBg);
+            if (idx < diffLines.length - 1) {
+              lineChunks.push({ __isChunk: true, text: '\n', fg: baseFg });
+            }
+            return lineChunks;
+          });
           scrollBox.add(
             new TextRenderable(renderer, {
-              content: buildHighlightedStyledText(block.diffText, query, baseFg, matchBg, matchFg),
+              content: new StyledText(chunks),
               fg: palette.fg,
             }),
           );

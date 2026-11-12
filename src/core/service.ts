@@ -353,16 +353,28 @@ export class PeriscopeService implements PeriscopeApi {
     const ensure = () => {
       for (const target of [...this.roots.map((r) => r.dir), path.dirname(this.agyMetadata)]) {
         if (this.watchers.has(target) || !fs.existsSync(target)) continue;
-        const w = fs.watch(target, { recursive: true }, (_eventType, filename) => {
-          if (!filename) return;
-          const fullPath = path.join(target, filename.toString());
-          if (!fullPath.endsWith('.jsonl') && !fullPath.endsWith('.meta.json') && fullPath !== this.agyMetadata) {
-            return;
-          }
-          reader.enqueue(fullPath);
-        });
-        w.on('error', (e) => console.error('periscope: watcher', target, e));
-        this.watchers.set(target, w);
+        try {
+          const w = fs.watch(target, { recursive: true }, (_eventType, filename) => {
+            if (!filename) return;
+            const fullPath = path.join(target, filename.toString());
+            if (!fullPath.endsWith('.jsonl') && !fullPath.endsWith('.meta.json') && fullPath !== this.agyMetadata) {
+              return;
+            }
+            reader.enqueue(fullPath);
+          });
+          w.on('error', (e) => {
+            console.error('periscope: watcher', target, e);
+            this.watchers.delete(target);
+            try {
+              w.close();
+            } catch {
+              /* ignore */
+            }
+          });
+          this.watchers.set(target, w);
+        } catch (e) {
+          console.error('periscope: watcher', target, e);
+        }
       }
     };
     ensure();

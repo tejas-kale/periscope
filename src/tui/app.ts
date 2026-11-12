@@ -684,12 +684,44 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     headerText.content = truncateText(raw, w);
   };
 
+  const wrapFooterNotice = (text: string, width: number): string[] => {
+    const maxW = Math.max(1, width);
+    if (text.length <= maxW) return [text];
+    const lines: string[] = [];
+    let current = '';
+    for (const word of text.split(' ')) {
+      const token = current ? ` ${word}` : word;
+      if (current.length + token.length <= maxW) {
+        current += token;
+        continue;
+      }
+      if (current) {
+        lines.push(current);
+        current = '';
+      }
+      if (word.length <= maxW) {
+        current = word;
+      } else {
+        for (let i = 0; i < word.length; i += maxW) {
+          const chunk = word.slice(i, i + maxW);
+          if (i + maxW < word.length) lines.push(chunk);
+          else current = chunk;
+        }
+      }
+    }
+    if (current) lines.push(current);
+    return lines.length > 0 ? lines : [''];
+  };
+
   const renderFooter = () => {
     const w = renderer.terminalWidth;
     if (statusMessage) {
-      footerText.content = truncateText(` ${statusMessage}`, w);
+      const lines = wrapFooterNotice(` ${statusMessage}`, w);
+      footerBar.height = Math.max(1, lines.length);
+      footerText.content = lines.join('\n');
       return;
     }
+    footerBar.height = 1;
     const selected = listState.selectedSessionId
       ? sessionsById.get(listState.selectedSessionId)
       : undefined;
@@ -1062,9 +1094,11 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
     const node = getSelectedNode(traceState);
     const outputExpanded = node ? (traceState.outputExpanded.get(node.ev.id) ?? false) : false;
+    const findQuery = traceState.find.open ? traceState.find.query : undefined;
     const model = buildDetailModel(node, {
       rawMode: traceState.rawMode,
       outputExpanded,
+      findQuery,
     });
     renderDetailContent({
       renderer,
@@ -1074,7 +1108,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       supportsImages: support.images,
       palette: detailPalette,
       syntaxStyle,
-      findQuery: traceState.find.open ? traceState.find.query : undefined,
+      findQuery,
       onToggleRaw: () => dispatchTrace({ type: 'toggleRaw' }),
       onToggleOutputExpand: () => {
         if (node) dispatchTrace({ type: 'toggleOutputExpand', id: node.ev.id });
@@ -1168,18 +1202,25 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     traceState = createTraceState([]);
     renderAll();
 
-    const events = await options.service.getEvents(session.id);
-    if (disposed || activeSessionId !== session.id) return;
-    traceState = createTraceState(events, focusEventId);
-    if (focusEventId) {
-      traceState = applyTraceAction(
-        traceState,
-        { type: 'selectId', id: focusEventId, scrollIntoView: true },
-        traceViewportHeight(),
-      );
+    try {
+      const events = await options.service.getEvents(session.id);
+      if (disposed || activeSessionId !== session.id) return;
+      traceState = createTraceState(events, focusEventId);
+      if (focusEventId) {
+        traceState = applyTraceAction(
+          traceState,
+          { type: 'selectId', id: focusEventId, scrollIntoView: true },
+          traceViewportHeight(),
+        );
+      }
+      renderAll();
+      void loadImagesForSelectedStep();
+    } catch (err) {
+      if (disposed) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      statusMessage = `Failed to load session: ${msg}`;
+      renderFooter();
     }
-    renderAll();
-    void loadImagesForSelectedStep();
   };
 
   const openSearchHit = (hit: SearchHit) => {
@@ -1286,63 +1327,70 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
   const runRefresh = async (changedIds?: string[]) => {
     if (disposed) return;
-    const [nextSessions, nextSandbox] = await Promise.all([
-      options.service.listSessions(filter),
-      options.service.sandboxStatus(),
-    ]);
-    if (disposed) return;
-    sessions = nextSessions;
-    sessionsById = new Map(sessions.map((s) => [s.id, s]));
-    sandbox = nextSandbox;
-    if (!listState.cursorKey && sessions.length > 0) {
-      listState = createSessionListState(sessions);
-    }
-    if (searchQuery.trim().length > 0) {
-      const gen = ++searchGen;
-      const hits = await options.service.search(searchQuery.trim(), filter);
+    try {
+      const [nextSessions, nextSandbox] = await Promise.all([
+        options.service.listSessions(filter),
+        options.service.sandboxStatus(),
+      ]);
       if (disposed) return;
-      if (gen === searchGen) {
-        searchHits = hits;
+      sessions = nextSessions;
+      sessionsById = new Map(sessions.map((s) => [s.id, s]));
+      sandbox = nextSandbox;
+      if (!listState.cursorKey && sessions.length > 0) {
+        listState = createSessionListState(sessions);
       }
-    }
+      if (searchQuery.trim().length > 0) {
+        const gen = ++searchGen;
+        const hits = await options.service.search(searchQuery.trim(), filter);
+        if (disposed) return;
+        if (gen === searchGen) {
+          searchHits = hits;
+        }
+      }
 
-    let traceChanged = false;
-    let detailChanged = false;
-    let selectionChanged = false;
+      let traceChanged = false;
+      let detailChanged = false;
+      let selectionChanged = false;
 
-    const currentSessionId = activeSessionId;
-    if (currentSessionId && (!changedIds || changedIds.includes(currentSessionId))) {
-      const maxSeq = traceState.events.length
-        ? traceState.events[traceState.events.length - 1]!.seq
-        : -1;
-      const fresh = await options.service.getEvents(currentSessionId, maxSeq - REFETCH_WINDOW);
+      const currentSessionId = activeSessionId;
+      if (currentSessionId && (!changedIds || changedIds.includes(currentSessionId))) {
+        const maxSeq = traceState.events.length
+          ? traceState.events[traceState.events.length - 1]!.seq
+          : -1;
+        const fresh = await options.service.getEvents(currentSessionId, maxSeq - REFETCH_WINDOW);
+        if (disposed) return;
+        if (activeSessionId === currentSessionId) {
+          const prevTrace = traceState;
+          traceState = appendTraceEvents(traceState, fresh, traceViewportHeight());
+          traceChanged = traceState !== prevTrace;
+          selectionChanged = traceState.selectedId !== prevTrace.selectedId;
+          detailChanged =
+            selectionChanged ||
+            (traceChanged &&
+              traceState.selectedId !== null &&
+              fresh.some(
+                (ev) => ev.id === traceState.selectedId || ev.parent_id === traceState.selectedId,
+              ));
+        }
+      }
+
+      updatePaneVisibility();
+      renderHeader();
+      if (showSandboxDetail) renderSandboxDetail();
+      renderSessionsPane();
+      if (traceChanged) renderTracePane();
+      if (selectionChanged) {
+        loadedImages = [];
+        void loadImagesForSelectedStep();
+      }
+      if (detailChanged) renderDetailPane();
+      renderFooter();
+    } catch (err) {
       if (disposed) return;
-      if (activeSessionId === currentSessionId) {
-        const prevTrace = traceState;
-        traceState = appendTraceEvents(traceState, fresh, traceViewportHeight());
-        traceChanged = traceState !== prevTrace;
-        selectionChanged = traceState.selectedId !== prevTrace.selectedId;
-        detailChanged =
-          selectionChanged ||
-          (traceChanged &&
-            traceState.selectedId !== null &&
-            fresh.some(
-              (ev) => ev.id === traceState.selectedId || ev.parent_id === traceState.selectedId,
-            ));
-      }
+      const msg = err instanceof Error ? err.message : String(err);
+      statusMessage = `Refresh failed: ${msg}`;
+      renderFooter();
     }
-
-    updatePaneVisibility();
-    renderHeader();
-    if (showSandboxDetail) renderSandboxDetail();
-    renderSessionsPane();
-    if (traceChanged) renderTracePane();
-    if (selectionChanged) {
-      loadedImages = [];
-      void loadImagesForSelectedStep();
-    }
-    if (detailChanged) renderDetailPane();
-    renderFooter();
   };
 
   const refresh = async (changedIds?: string[]) => {

@@ -156,6 +156,7 @@ test('headless UI three-pane: trace tree folding, subagents, expand/collapse, de
       agyMetadata: path.join(tmp, 'nonexistent.json'),
       claudeSessionsDir: path.join(tmp, 'no-sessions'),
       sandboxEnabled: false,
+      debounceMs: 20,
     });
 
     const { createTestRenderer } = await import('@opentui/core/testing');
@@ -299,6 +300,7 @@ test('headless UI three-pane: image renders inline when terminal supports kitty_
       agyMetadata: path.join(tmp, 'nonexistent.json'),
       claudeSessionsDir: path.join(tmp, 'no-sessions'),
       sandboxEnabled: false,
+      debounceMs: 20,
     });
 
     const { createTestRenderer } = await import('@opentui/core/testing');
@@ -372,6 +374,7 @@ test('headless UI three-pane: 5,000+ step session selection and append stay fast
       agyMetadata: path.join(tmp, 'nonexistent.json'),
       claudeSessionsDir: path.join(tmp, 'no-sessions'),
       sandboxEnabled: false,
+      debounceMs: 20,
     });
 
     const { createTestRenderer } = await import('@opentui/core/testing');
@@ -414,7 +417,9 @@ test('headless UI three-pane: 5,000+ step session selection and append stay fast
         `expected fast selection frame (<50ms avg, <250ms max), got avg=${moveStats.averageFrameTime}ms max=${moveStats.maxFrameTime}ms`,
       );
 
-      // Append a new step to the file and refresh
+      // Enable follow mode, append a new step, and wait for it to be ingested & rendered
+      await mockInput.pressKey('f');
+      await renderOnce();
       renderer.resetStats();
       fs.appendFileSync(
         filePath,
@@ -426,8 +431,19 @@ test('headless UI three-pane: 5,000+ step session selection and append stay fast
           message: { role: 'user', content: 'Appended step 5200' },
         }) + '\n',
       );
-      await renderOnce();
+      const deadline = Date.now() + 3000;
+      let renderedAppended = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+        await renderOnce();
+        if (captureCharFrame().includes('Appended step 5200')) {
+          renderedAppended = true;
+          break;
+        }
+      }
+      assert.ok(renderedAppended, 'expected appended step 5200 to be ingested and rendered in trace tree');
       const appendStats = renderer.getStats();
+      assert.ok(appendStats.frameCount >= 1);
       assert.ok(
         appendStats.averageFrameTime < 50,
         `expected fast append frame (<50ms avg), got ${appendStats.averageFrameTime}ms`,

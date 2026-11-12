@@ -103,7 +103,19 @@ test('clipboard view-model: copyWithFallback uses OSC 52 when supported and with
     assert.equal(unsup.method, 'tempfile');
     assert.ok(unsup.filePath && unsup.filePath.startsWith(tmpDir));
     assert.equal(fs.readFileSync(unsup.filePath, 'utf8'), 'secret output');
+    assert.equal(fs.statSync(unsup.filePath).mode & 0o777, 0o600);
     assert.ok(unsup.statusMessage.includes(unsup.filePath));
+
+    // 2b. Temp file write failure returns error notice instead of throwing
+    const failed = copyWithFallback('secret output', {
+      label: 'step text',
+      osc52Supported: false,
+      copyOsc52: () => false,
+      tmpDir: path.join(tmpDir, 'does-not-exist'),
+    });
+    assert.equal(failed.method, 'error');
+    assert.equal(failed.filePath, undefined);
+    assert.match(failed.statusMessage, /failed to write step text/i);
 
     // 3. Exceeds size cap -> temp file even if OSC 52 supported
     const big = 'x'.repeat(OSC52_MAX_BYTES + 1);
