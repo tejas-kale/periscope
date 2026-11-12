@@ -47,8 +47,16 @@ import {
   type FocusPane,
   type LayoutState,
 } from '../view-model/layout.ts';
+import {
+  copyWithFallback,
+  extractCodeBlockText,
+  extractDiffText,
+  extractStepCopyText,
+  keyToCopyAction,
+  type CopyAction,
+} from '../view-model/clipboard.ts';
 import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
-import { detectCapabilities } from './adapter.ts';
+import { createOpenTuiAdapter, type TuiAdapter } from './adapter.ts';
 import {
   createDetailSyntaxStyle,
   getDetailPalette,
@@ -66,6 +74,7 @@ export interface PeriscopeAppService
 
 export interface PeriscopeAppOptions {
   service: PeriscopeAppService;
+  adapter?: Pick<TuiAdapter<CliRenderer>, 'detectCapabilities' | 'copyToClipboard'>;
   theme: ThemeOption;
   clock?: () => number;
   initiallyIndexing?: boolean;
@@ -196,7 +205,8 @@ function decodeBase64DataUrl(dataUrl: string): Buffer | undefined {
 
 /** Mount the Periscope terminal UI (session list + windowed trace tree + detail pane). */
 export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOptions): PeriscopeAppHandle {
-  const support = detectCapabilities(renderer);
+  const adapter = options.adapter ?? createOpenTuiAdapter();
+  const support = adapter.detectCapabilities(renderer);
   let themeSetting: ThemeOption = options.theme;
   let resolvedTheme: 'dark' | 'light' =
     themeSetting === 'auto' ? (renderer.themeMode ?? 'dark') : themeSetting;
@@ -217,6 +227,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   let sandbox: SandboxState = { state: 'unknown' };
   let showSandboxDetail = false;
   let showHelp = false;
+  let statusMessage: string | null = null;
   let progress: IndexProgress = options.initiallyIndexing
     ? { indexed: 0, total: 0, done: false }
     : { indexed: 0, total: 0, done: true };
@@ -504,19 +515,33 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const renderHeader = () => {
     const w = renderer.terminalWidth;
     const zoomTag = layoutState.detailZoomed ? ' [zoom]' : '';
+    const followTag = activeSessionId
+      ? traceState.follow
+        ? ' [FOLLOW]'
+        : ''
+      : '';
     if (w <= 95) {
-      const panePart = activeSessionId ? ` | ${focus}${zoomTag}` : '';
+      const panePart = activeSessionId ? ` | ${focus}${zoomTag}${followTag}` : '';
       const raw = ` Periscope | ${resolvedTheme} | ${formatSandboxStatus(sandbox)}${panePart} | ? | q`;
       headerText.content = truncateText(raw, w);
       return;
     }
     const focusLabel = activeSessionId ? `  |  pane: ${focus}${zoomTag} (Tab)` : '';
-    const raw = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}${focusLabel}  |  ? help  |  q quit`;
+    const followLabel = activeSessionId
+      ? traceState.follow
+        ? '  |  [FOLLOW] (f)'
+        : '  |  follow: off (f)'
+      : '';
+    const raw = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}${focusLabel}${followLabel}  |  ? help  |  q quit`;
     headerText.content = truncateText(raw, w);
   };
 
   const renderFooter = () => {
     const w = renderer.terminalWidth;
+    if (statusMessage) {
+      footerText.content = truncateText(` ${statusMessage}`, w);
+      return;
+    }
     const selected = listState.selectedSessionId
       ? sessions.find((s) => s.id === listState.selectedSessionId)
       : undefined;
@@ -524,6 +549,49 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       ? ` Selected: ${selected.title || selected.id} (${formatAgent(selected.agent)}, ${formatHost(selected.host)})`
       : ' Navigate: ↑/↓/j/k  Toggle: Space/←/→  Quick-open: 1-9  Open: Enter  Help: ?';
     footerText.content = truncateText(raw, w);
+  };
+
+  const performCopy = (text: string | null, label: string, emptyMessage: string) => {
+    if (!text) {
+      statusMessage = emptyMessage;
+      renderFooter();
+      return;
+    }
+    const result = copyWithFallback(text, {
+      label,
+      osc52Supported: support.osc52,
+      copyOsc52: (value) => adapter.copyToClipboard(renderer, value),
+    });
+    statusMessage = result.statusMessage;
+    renderFooter();
+  };
+
+  const handleCopyAction = (action: CopyAction) => {
+    if (action.type === 'copySessionId' || action.type === 'copySourcePath') {
+      const target =
+        (activeSessionId ? sessions.find((s) => s.id === activeSessionId) : undefined) ??
+        (listState.selectedSessionId ? sessions.find((s) => s.id === listState.selectedSessionId) : undefined);
+      if (!target) {
+        statusMessage = 'No session selected';
+        renderFooter();
+        return;
+      }
+      if (action.type === 'copySessionId') {
+        performCopy(target.id, 'session ID', 'No session ID');
+      } else {
+        performCopy(target.source_path, 'source path', 'No source path');
+      }
+      return;
+    }
+
+    const node = getSelectedNode(traceState);
+    if (action.type === 'copyText') {
+      performCopy(extractStepCopyText(node), 'step text', 'No step text to copy');
+    } else if (action.type === 'copyCode') {
+      performCopy(extractCodeBlockText(node), 'code block', 'No code block in selected step');
+    } else if (action.type === 'copyDiff') {
+      performCopy(extractDiffText(node), 'diff', 'No diff in selected step');
+    }
   };
 
   const renderSessionsPane = () => {
@@ -748,6 +816,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const dispatchSessionList = (action: Parameters<typeof applySessionListAction>[2]) => {
+    statusMessage = null;
     const prevSelected = listState.selectedSessionId;
     const nextState = applySessionListAction(listState, sessions, action);
     listState = nextState;
@@ -782,11 +851,18 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const dispatchTrace = (action: TraceAction) => {
+    const hadStatus = statusMessage !== null;
+    statusMessage = null;
     const prevSel = traceState.selectedId;
     const prevRaw = traceState.rawMode;
+    const prevFollow = traceState.follow;
     const prevExp = prevSel ? traceState.outputExpanded.get(prevSel) : undefined;
     traceState = applyTraceAction(traceState, action, traceViewportHeight());
     renderTracePane();
+    if (traceState.follow !== prevFollow) {
+      renderHeader();
+    }
+    if (hadStatus) renderFooter();
 
     const nextSel = traceState.selectedId;
     const nextExp = nextSel ? traceState.outputExpanded.get(nextSel) : undefined;
@@ -799,7 +875,11 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
-  const refresh = async () => {
+  let refreshing = false;
+  let queuedAll = false;
+  let queuedIds = new Set<string>();
+
+  const runRefresh = async (changedIds?: string[]) => {
     if (disposed) return;
     const [nextSessions, nextSandbox] = await Promise.all([
       options.service.listSessions({}),
@@ -811,15 +891,65 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     if (!listState.cursorKey && sessions.length > 0) {
       listState = createSessionListState(sessions);
     }
-    if (activeSessionId) {
+
+    let traceChanged = false;
+    let detailChanged = false;
+    let selectionChanged = false;
+
+    const currentSessionId = activeSessionId;
+    if (currentSessionId && (!changedIds || changedIds.includes(currentSessionId))) {
       const maxSeq = traceState.events.length
         ? traceState.events[traceState.events.length - 1]!.seq
         : -1;
-      const fresh = await options.service.getEvents(activeSessionId, maxSeq - REFETCH_WINDOW);
+      const fresh = await options.service.getEvents(currentSessionId, maxSeq - REFETCH_WINDOW);
       if (disposed) return;
-      traceState = appendTraceEvents(traceState, fresh);
+      if (activeSessionId === currentSessionId) {
+        const prevTrace = traceState;
+        traceState = appendTraceEvents(traceState, fresh, traceViewportHeight());
+        traceChanged = traceState !== prevTrace;
+        selectionChanged = traceState.selectedId !== prevTrace.selectedId;
+        detailChanged =
+          selectionChanged ||
+          (traceChanged &&
+            traceState.selectedId !== null &&
+            fresh.some(
+              (ev) => ev.id === traceState.selectedId || ev.parent_id === traceState.selectedId,
+            ));
+      }
     }
-    renderAll();
+
+    updatePaneVisibility();
+    renderHeader();
+    if (showSandboxDetail) renderSandboxDetail();
+    renderSessionsPane();
+    if (traceChanged) renderTracePane();
+    if (selectionChanged) {
+      loadedImages = [];
+      void loadImagesForSelectedStep();
+    }
+    if (detailChanged) renderDetailPane();
+    renderFooter();
+  };
+
+  const refresh = async (changedIds?: string[]) => {
+    if (disposed) return;
+    if (refreshing) {
+      if (!changedIds) queuedAll = true;
+      else for (const id of changedIds) queuedIds.add(id);
+      return;
+    }
+    refreshing = true;
+    try {
+      await runRefresh(changedIds);
+      while (!disposed && (queuedAll || queuedIds.size > 0)) {
+        const nextIds = queuedAll ? undefined : [...queuedIds];
+        queuedAll = false;
+        queuedIds.clear();
+        await runRefresh(nextIds);
+      }
+    } finally {
+      refreshing = false;
+    }
   };
 
   const onKeypress = (key: KeyInputLike) => {
@@ -926,6 +1056,18 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
 
+    const copyAction = keyToCopyAction(key);
+    if (copyAction) {
+      if (copyAction.type === 'copySessionId' || copyAction.type === 'copySourcePath') {
+        handleCopyAction(copyAction);
+        return;
+      }
+      if (activeSessionId && (focus === 'trace' || focus === 'detail')) {
+        handleCopyAction(copyAction);
+        return;
+      }
+    }
+
     if (focus === 'sessions') {
       const action = keyToSessionListAction(key);
       if (action) dispatchSessionList(action);
@@ -959,6 +1101,10 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
         }
         if (key.name === 'r') {
           dispatchTrace({ type: 'toggleRaw' });
+          return;
+        }
+        if (key.name === 'f') {
+          dispatchTrace({ type: 'toggleFollow' });
           return;
         }
         if (key.name === 'e') {
@@ -1010,8 +1156,8 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       }
     }) ?? (() => {});
 
-  const offChange = options.service.onChange((_n: ChangeNotice) => {
-    void refresh();
+  const offChange = options.service.onChange((n: ChangeNotice) => {
+    void refresh(n.sessionIds);
   });
 
   const offSandbox = options.service.onSandbox((s: SandboxState) => {

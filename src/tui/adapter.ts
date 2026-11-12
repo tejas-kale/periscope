@@ -49,6 +49,7 @@ export interface TuiAdapter<R extends RendererLike = RendererLike> {
   destroyRenderer(renderer: R): void;
   detectCapabilities(renderer: R): TerminalSupport;
   createTextNode(renderer: R, content: string): unknown;
+  copyToClipboard(renderer: R, text: string): boolean;
 }
 
 /** Extract normalized terminal capability flags from an OpenTUI renderer. */
@@ -83,6 +84,13 @@ export function createOpenTuiAdapter(): TuiAdapter<CliRenderer> {
     },
     createTextNode(renderer: CliRenderer, content: string) {
       return new TextRenderable(renderer, { content });
+    },
+    copyToClipboard(renderer: CliRenderer, text: string) {
+      try {
+        return renderer.copyToClipboardOSC52(text);
+      } catch {
+        return false;
+      }
     },
   };
 }

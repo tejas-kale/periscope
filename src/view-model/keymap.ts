@@ -37,6 +37,7 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
   { section: 'Trace Tree', keys: 'Enter', description: 'Focus detail pane' },
   { section: 'Trace Tree', keys: 'r', description: 'Toggle raw / rendered Markdown' },
   { section: 'Trace Tree', keys: 'e', description: 'Expand / collapse long tool output' },
+  { section: 'Trace Tree', keys: 'f', description: 'Toggle live follow mode' },
 
   // Detail Pane
   { section: 'Detail Pane', keys: '↑/↓ or k/j', description: 'Scroll detail content' },
@@ -44,6 +45,8 @@ export const KEY_BINDINGS: readonly KeyBinding[] = [
   { section: 'Detail Pane', keys: 'h / Esc', description: 'Return focus to trace tree' },
   { section: 'Detail Pane', keys: 'r', description: 'Toggle raw / rendered Markdown' },
   { section: 'Detail Pane', keys: 'e', description: 'Expand / collapse long tool output' },
+  { section: 'Detail Pane', keys: 'y / c / d', description: 'Copy step text / code block / diff' },
+  { section: 'Detail Pane', keys: 'i / p', description: 'Copy session ID / source file path' },
 ];
 
 function truncateLine(text: string, maxWidth: number): string {
