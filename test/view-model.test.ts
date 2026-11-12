@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAnsi } from '../src/renderer/lib/ansi.ts';
-import { lineDiff, looksLikeDiff, parseUnified } from '../src/renderer/lib/diff.ts';
-import { buildTree, cleanUserText, execCommand, findMatches, flatten, hint, isContext, mergeEvents, fmtDuration, visibleId } from '../src/renderer/lib/tree.ts';
-import { looksLikeMarkdown } from '../src/renderer/lib/markdown.ts';
+import { parseAnsi } from '../src/view-model/ansi.ts';
+import { lineDiff, looksLikeDiff, parseUnified } from '../src/view-model/diff.ts';
+import { buildTree, cleanUserText, execCommand, findMatches, flatten, hint, isContext, mergeEvents, fmtDuration, visibleId } from '../src/view-model/tree.ts';
+import { looksLikeMarkdown } from '../src/view-model/markdown.ts';
 import type { EventRow } from '../src/core/types.ts';
 
 test('ansi: colours, bold, reset and dropped cursor codes', () => {

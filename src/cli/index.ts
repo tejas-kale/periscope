@@ -24,17 +24,39 @@ async function main(): Promise<void> {
     return;
   }
 
-  const [{ createOpenTuiAdapter, runTuiLifecycle }, { mountShell }] = await Promise.all([
+  const [{ PeriscopeService }, { createOpenTuiAdapter, runTuiLifecycle }, { mountPeriscopeApp }] = await Promise.all([
+    import('../core/service.ts'),
     import('../tui/adapter.ts'),
-    import('../tui/shell.ts'),
+    import('../tui/app.ts'),
   ]);
-  const adapter = createOpenTuiAdapter();
-  await runTuiLifecycle(adapter, (renderer, requestQuit) => {
-    mountShell(adapter, renderer, {
-      theme: parsed.options.theme,
-      onQuit: requestQuit,
-    });
+  const service = new PeriscopeService({
+    dbPath: parsed.options.dbPath,
+    sandboxEnabled: parsed.options.sandbox,
   });
+  const adapter = createOpenTuiAdapter();
+  let handle: ReturnType<typeof mountPeriscopeApp> | undefined;
+  let startupError: unknown = null;
+  try {
+    await runTuiLifecycle(adapter, (renderer, requestQuit) => {
+      handle = mountPeriscopeApp(renderer, {
+        service,
+        theme: parsed.options.theme,
+        initiallyIndexing: true,
+        onQuit: requestQuit,
+      });
+      void service.start().then(
+        () => handle?.refresh(),
+        (err: unknown) => {
+          startupError = err;
+          requestQuit();
+        },
+      );
+    });
+  } finally {
+    handle?.dispose();
+    await service.stop();
+  }
+  if (startupError) throw startupError;
 }
 
 main().catch((err: unknown) => {
