@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { watch, type FSWatcher } from 'chokidar';
 import { Ingestor } from './ingest.ts';
 import { NativeReader, nativeRoots, type NativeRoot } from './native.ts';
 import { DEFAULT_IMAGE, PodmanPoller, type Exec } from './podman.ts';
@@ -149,7 +148,7 @@ export class PeriscopeService implements PeriscopeApi {
 
   private pending = new Set<string>();
   private flushTimer: NodeJS.Timeout | null = null;
-  private watchers = new Map<string, FSWatcher>();
+  private watchers = new Map<string, fs.FSWatcher>();
   private intervals: NodeJS.Timeout[] = [];
   private started = false;
 
@@ -206,9 +205,8 @@ export class PeriscopeService implements PeriscopeApi {
     }
     this.pending.clear();
 
-    const closing = [...this.watchers.values()].map((w) => w.close());
+    for (const w of this.watchers.values()) w.close();
     this.watchers.clear();
-    await Promise.all(closing);
 
     if (this.reader) await this.reader.idle;
 
@@ -355,13 +353,14 @@ export class PeriscopeService implements PeriscopeApi {
     const ensure = () => {
       for (const target of [...this.roots.map((r) => r.dir), path.dirname(this.agyMetadata)]) {
         if (this.watchers.has(target) || !fs.existsSync(target)) continue;
-        const w = watch(target, {
-          ignoreInitial: true,
-          ignored: (p, st) => !!st?.isFile() && !p.endsWith('.jsonl') && !p.endsWith('.meta.json') && p !== this.agyMetadata,
-          depth: 8,
+        const w = fs.watch(target, { recursive: true }, (_eventType, filename) => {
+          if (!filename) return;
+          const fullPath = path.join(target, filename.toString());
+          if (!fullPath.endsWith('.jsonl') && !fullPath.endsWith('.meta.json') && fullPath !== this.agyMetadata) {
+            return;
+          }
+          reader.enqueue(fullPath);
         });
-        w.on('add', (p) => reader.enqueue(p));
-        w.on('change', (p) => reader.enqueue(p));
         w.on('error', (e) => console.error('periscope: watcher', target, e));
         this.watchers.set(target, w);
       }

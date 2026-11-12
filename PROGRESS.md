@@ -1,50 +1,29 @@
-# Periscope: progress (2026-11-08)
+# Periscope: progress
 
-Branch `agent/claude-20261108-140312`. Spec: [SPEC.md](SPEC.md).
+Spec: [SPEC.md](SPEC.md) · CLI & Terminal UI implementation complete.
 
-## Done and tested (`npm test`: 27 pass, plain Node, no packages needed)
+## Completed
 
-- `src/core/`: Claude Code, Codex, Antigravity parsers; SQLite store with FTS5; incremental, idempotent ingestor
-  (per-file offset + parser state in `files`); native reader; Podman poller (read-only `node -e` container).
-- `src/renderer/lib/`: trace tree, Show filter, collapse, in-session search, ANSI parser, line diff.
-- Fixtures: redacted real sessions in `test/fixtures/` (`scripts/redact-fixture.mjs`).
-- Smoke run over all 146 transcripts in this container (96 MB): ~0.9 s, no orphaned events.
+1. **CLI & Terminal Shell (`src/cli/`, `src/tui/adapter.ts`, `src/tui/shell.ts`):**
+   - `periscope` bin entrypoint with `--help`, `--version`, `--db`, `--sandbox`/`--no-sandbox`, and `--theme` (`auto` | `dark` | `light`).
+   - OpenTUI (`@opentui/core` `0.8.4`) imperative adapter and terminal lifecycle shell that restores terminal state on quit (`q`, `Ctrl+C`) or uncaught errors.
+2. **Core Service (`src/core/service.ts`):**
+   - Extracted `PeriscopeService` implementing `PeriscopeApi` with `node:sqlite` (FTS5), `fs.watch(..., { recursive: true })`, `NativeReader`, `PodmanPoller`, Claude Code presence tracking, live-session expiry, and debounced change notifications.
+   - Injectable clock, process runner, and filesystem roots for deterministic testing.
+3. **Pure View-Model (`src/view-model/`):**
+   - Moved and expanded pure logic for trace tree building, tool-result folding, noise filtering, Show filter, collapse/expand, windowed rendering, follow mode, in-session find, session list grouping/filtering, FTS5 snippet parsing, detail formatting (Markdown, diffs, ANSI, images), stats/context views, clipboard fallback, responsive layout, sandbox status, and `KEY_BINDINGS`.
+4. **Three-Pane Terminal UI (`src/tui/app.ts`, `src/tui/detail-pane.ts`, `src/tui/highlight.ts`):**
+   - Session list grouped by project (top 3 expanded), `1-9` quick-open, agent/host/status/date filters, and global FTS5 search with snippet jump.
+   - Windowed trace tree with subagent nesting, Show filter, Collapse-all toggle, Stats (`s`) and Context (`x`) views, and in-session find (`/`, `n`/`N`, `Esc`).
+   - Detail pane with Markdown/Raw toggle (`r`), syntax-highlighted code, unified diffs, ANSI shell output with 40-line collapse/expand (`e`), and inline image protocol or placeholder.
+   - Live session append without moving scroll/selection, follow mode (`f`), live session list updates, and Podman sandbox status (`S`).
+   - Clipboard copy (`y`/`c`/`d`/`i`/`p`) via OSC 52 with temp-file fallback.
+   - Responsive layout down to `80x24`, pane resizing (`[`/`]`/`=`), detail zoom (`Z`), light/dark theme toggle (`t`), and `?` help overlay.
+5. **Electron Removal & Documentation:**
+   - Removed Electron, `electron-builder`, React, Vite, Shiki, `react-markdown`, `better-sqlite3`, `chokidar`, dmg packaging, icon tooling, and `src/main/` + `src/renderer/`.
+   - Updated `SPEC.md`, `PROGRESS.md`, and `README.md` for the terminal app.
 
-## Built and launched on the Mac (2026-11-08)
+## Verification
 
-- `npm install`, `npm run typecheck` (clean), `npm test` (27 pass), `npm run build` all succeed.
-- `npx electron .` starts with no errors; native ingest filled the DB (181 sessions, 17k events).
-- Setup gotchas: npm skipped install scripts, so run `npx electron-builder install-app-deps`.
-  `node_modules/electron/install.js` exits silently on Node 26 without extracting; unzip the cached zip
-  (~/Library/Caches/electron) into `node_modules/electron/dist` and write `path.txt`
-  (`Electron.app/Contents/MacOS/Electron`).
-
-## UI pass 1 (2026-11-08, not yet run on the Mac)
-
-Results fold into their tool call; noise rows hidden (empty thinking, injected context, /exit, caveats, bare
-system subtypes); injected context moved to a Context panel (`i`); Codex exec shown as its shell command; code
-and output wrap; Markdown output rendered (Raw toggle); SVG kind icons and a bigger chevron; keyboard
-shortcuts with a `?` modal; sidebar: top 3 projects open, 4 chats each plus "Show 4 more"; sandbox badge
-click shows the Podman error.
-
-## Next steps
-
-1. Eyeball the UI (sidebar, trace tree, detail, Cmd+F, live follow, sandbox source) and fix what breaks.
-2. Shiki bundles every language; restrict to the languages actually used.
-3. `npm run dist` for the dmg; then tick the Slices in SPEC.md.
-
-## Decisions taken (not in the spec)
-
-- `files` has two extra columns, `session_id` and `state` (parser state JSON), so a chunked read resumes exactly.
-- Session ids: `n:<uuid>` native, `s:<uuid>` sandbox. Sandbox file paths: `podman:<volume>:<path in volume>`.
-- Claude subagent files join the parent session, nested under the Agent tool call (from `agent-*.meta.json`).
-- Bookkeeping records (api-request*, file-history*, mode, cost-state, ...) are skipped, not stored as meta.
-- Antigravity sample came from this container (`~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl`):
-  tool results are the GENERIC steps after a PLANNER_RESPONSE, matched in order.
-- Sandbox layout: `claude-home` = `~/.claude` (Codex at `codex/sessions`), `agy-home` = `~/.gemini`.
-- Tests use `node:sqlite` behind the `SqlDb` interface; the app uses `better-sqlite3`.
-- Presence: Claude Code's `~/.claude/sessions/<pid>.json` registry (busy = running, idle = open). Native entries
-  count while the pid is alive; sandbox entries while a sandbox container started before them still runs
-  (`podman ps`, poll containers carry `periscope.poll=1`). Codex and Antigravity: written in the last 30 s.
-  Sandbox mtimes are shifted by the VM clock skew (poll script returns its `Date.now()`).
-- In-session search is client-side, highlighted with the CSS Custom Highlight API; global search is FTS5.
+- `npm test`: 107 tests passing via `node --test` (core parsers, store, service, view-model, CLI, and headless OpenTUI integration tests including 5,000+ step performance check).
+- `npm run typecheck`: `tsc --noEmit -p tsconfig.json` passing with 0 errors.
