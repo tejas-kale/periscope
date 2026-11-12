@@ -40,6 +40,7 @@ async function main(): Promise<void> {
     await runTuiLifecycle(adapter, (renderer, requestQuit) => {
       handle = mountPeriscopeApp(renderer, {
         service,
+        adapter,
         theme: parsed.options.theme,
         initiallyIndexing: true,
         onQuit: requestQuit,
