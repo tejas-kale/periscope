@@ -1,50 +1,24 @@
 {
   "name": "periscope",
-  "productName": "Periscope",
   "version": "0.1.0",
   "description": "Browse, search and watch Claude Code, Codex and Antigravity CLI transcripts",
   "private": true,
   "type": "module",
-  "main": "dist-electron/main.cjs",
   "bin": {
     "periscope": "./src/cli/index.ts"
   },
+  "engines": {
+    "node": ">=26.4.0"
+  },
   "scripts": {
     "test": "node --test --disable-warning=ExperimentalWarning 'test/**/*.test.ts'",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build:main": "node scripts/build-main.mjs",
-    "build:renderer": "vite build",
-    "build": "npm run build:main && npm run build:renderer",
-    "dev": "npm run build:main && concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env PERISCOPE_DEV_URL=http://localhost:5173 electron .\"",
-    "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --mac dmg",
-    "postinstall": "electron-builder install-app-deps",
-    "icon": "python3 scripts/make-icon.py"
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@opentui/core": "0.8.4",
-    "better-sqlite3": "^12.2.0"
+    "@opentui/core": "0.8.4"
   },
   "devDependencies": {
-    "@tanstack/react-virtual": "^3.13.12",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.18.0",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^5.0.0",
-    "chokidar": "^4.0.3",
-    "concurrently": "^9.2.0",
-    "cross-env": "^10.0.0",
-    "electron": "^38.0.0",
-    "electron-builder": "^26.0.12",
-    "esbuild": "^0.25.8",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "shiki": "^3.9.0",
-    "typescript": "^5.9.2",
-    "vite": "^7.1.0",
-    "wait-on": "^8.0.4"
+    "typescript": "^5.9.2"
   }
 }
