@@ -292,3 +292,157 @@ test('sandbox poller with injectable exec, native presence, and readImage work a
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('sandbox respects PERISCOPE_SANDBOX=0, --no-sandbox, and PERISCOPE_SANDBOX_IMAGE at service seam', async () => {
+  const prevSandbox = process.env.PERISCOPE_SANDBOX;
+  const prevImage = process.env.PERISCOPE_SANDBOX_IMAGE;
+  const noAgy = path.join(os.tmpdir(), 'periscope-no-agy', 'nonexistent.json');
+  try {
+    // 1. PERISCOPE_SANDBOX=0 disables poller without calling exec
+    process.env.PERISCOPE_SANDBOX = '0';
+    let calls = 0;
+    const svcEnvOff = new PeriscopeService({
+      dbPath: ':memory:',
+      roots: [],
+      agyMetadata: noAgy,
+      claudeSessionsDir: '/nonexistent',
+      podman: '/usr/bin/podman',
+      exec: async () => {
+        calls++;
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    await svcEnvOff.start();
+    try {
+      const st = await svcEnvOff.sandboxStatus();
+      assert.equal(st.state, 'disabled');
+      assert.match(st.message ?? '', /PERISCOPE_SANDBOX=0/);
+      assert.equal(calls, 0);
+    } finally {
+      await svcEnvOff.stop();
+    }
+
+    // 2. sandboxEnabled: false (--no-sandbox) disables poller even when env is not 0
+    delete process.env.PERISCOPE_SANDBOX;
+    const svcFlagOff = new PeriscopeService({
+      dbPath: ':memory:',
+      roots: [],
+      agyMetadata: noAgy,
+      claudeSessionsDir: '/nonexistent',
+      sandboxEnabled: false,
+      podman: '/usr/bin/podman',
+      exec: async () => {
+        calls++;
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    await svcFlagOff.start();
+    try {
+      const st = await svcFlagOff.sandboxStatus();
+      assert.equal(st.state, 'disabled');
+      assert.match(st.message ?? '', /--no-sandbox/);
+      assert.equal(calls, 0);
+    } finally {
+      await svcFlagOff.stop();
+    }
+
+    // 3. PERISCOPE_SANDBOX_IMAGE is used in podman ps/run and never starts podman machine
+    process.env.PERISCOPE_SANDBOX_IMAGE = 'localhost/custom-sandbox:v2';
+    const seenArgs: string[][] = [];
+    const svcCustomImg = new PeriscopeService({
+      dbPath: ':memory:',
+      roots: [],
+      agyMetadata: noAgy,
+      claudeSessionsDir: '/nonexistent',
+      podman: '/usr/bin/podman',
+      pollMs: 5000,
+      exec: async (_cmd, args) => {
+        seenArgs.push(args);
+        if (args[0] === 'volume') return { code: 0, stdout: 'claude-home\n', stderr: '' };
+        if (args[0] === 'ps') return { code: 0, stdout: '[]', stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ files: [], metas: {}, sidecars: {}, errors: [], presence: [] }), stderr: '' };
+      },
+    });
+    await svcCustomImg.start();
+    try {
+      await new Promise((r) => setTimeout(r, 30));
+      const runArgs = seenArgs.find((a) => a[0] === 'run');
+      assert.ok(runArgs, 'expected podman run call');
+      assert.ok(runArgs.includes('localhost/custom-sandbox:v2'));
+      assert.ok(!seenArgs.some((a) => a.includes('machine') || a.includes('start')));
+    } finally {
+      await svcCustomImg.stop();
+    }
+  } finally {
+    if (prevSandbox === undefined) delete process.env.PERISCOPE_SANDBOX;
+    else process.env.PERISCOPE_SANDBOX = prevSandbox;
+    if (prevImage === undefined) delete process.env.PERISCOPE_SANDBOX_IMAGE;
+    else process.env.PERISCOPE_SANDBOX_IMAGE = prevImage;
+  }
+});
+
+test('sandbox ingests sandbox sessions alongside Mac sessions and reports error state', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'periscope-sbx-mix-'));
+  try {
+    const macClaudeRoot = path.join(tmp, 'mac-claude');
+    const macId = '11111111-1111-1111-1111-111111111111';
+    const macFile = path.join(macClaudeRoot, 'proj-mac', `${macId}.jsonl`);
+    fs.mkdirSync(path.dirname(macFile), { recursive: true });
+    fs.writeFileSync(
+      macFile,
+      JSON.stringify({ type: 'user', cwd: '/work/mac', timestamp: '2026-06-01T10:00:00Z', message: { role: 'user', content: 'Mac prompt' } }) + '\n',
+    );
+
+    const volRoot = path.join(tmp, 'vol');
+    const sbxId = '22222222-2222-2222-2222-222222222222';
+    const sbxFile = path.join(volRoot, 'v/claude-home/projects/proj-sbx', `${sbxId}.jsonl`);
+    fs.mkdirSync(path.dirname(sbxFile), { recursive: true });
+    fs.writeFileSync(
+      sbxFile,
+      JSON.stringify({ type: 'user', cwd: '/work/sbx', timestamp: '2026-06-01T11:00:00Z', message: { role: 'user', content: 'Sandbox prompt' } }) + '\n',
+    );
+
+    let tick = 0;
+    const states: SandboxState[] = [];
+    const service = new PeriscopeService({
+      dbPath: ':memory:',
+      roots: [{ agent: 'claude' as const, dir: macClaudeRoot }],
+      agyMetadata: path.join(tmp, 'nonexistent.json'),
+      claudeSessionsDir: path.join(tmp, 'no-sessions'),
+      podman: '/usr/bin/podman',
+      pollMs: 25,
+      exec: async (_cmd, args, input) => {
+        if (args[0] === 'volume') {
+          tick++;
+          if (tick === 1) return { code: 125, stdout: '', stderr: 'Error: invalid reference format' };
+          return { code: 0, stdout: 'claude-home\n', stderr: '' };
+        }
+        if (args[0] === 'ps') return { code: 0, stdout: '[]', stderr: '' };
+        const script = args[args.indexOf('-e') + 1]!;
+        const req = input!.replaceAll('"/v/', JSON.stringify(volRoot + '/v/').slice(0, -1));
+        const r = spawnSync(process.execPath, ['-e', script], { input: req, encoding: 'utf8' });
+        return { code: r.status ?? 1, stdout: r.stdout.replaceAll(volRoot + '/v/', '/v/'), stderr: r.stderr };
+      },
+    });
+    service.onSandbox((s) => states.push(s));
+
+    await service.start();
+    try {
+      await new Promise((r) => setTimeout(r, 80));
+      const errState = states.find((s) => s.state === 'error');
+      assert.ok(errState, 'expected error state');
+      assert.match(errState.message ?? '', /invalid reference format/);
+      assert.equal((await service.sandboxStatus()).state, 'online');
+
+      const sessions = await service.listSessions({});
+      assert.equal(sessions.length, 2);
+      assert.ok(sessions.some((s) => s.host === 'native' && s.id === `n:${macId}`));
+      assert.ok(sessions.some((s) => s.host === 'sandbox' && s.id === `s:${sbxId}`));
+    } finally {
+      await service.stop();
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

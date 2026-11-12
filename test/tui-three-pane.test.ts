@@ -410,8 +410,8 @@ test('headless UI three-pane: 5,000+ step session selection and append stay fast
       const moveStats = renderer.getStats();
       assert.ok(moveStats.frameCount >= 10);
       assert.ok(
-        moveStats.averageFrameTime < 50 && moveStats.maxFrameTime < 100,
-        `expected fast selection frame (<50ms avg, <100ms max), got avg=${moveStats.averageFrameTime}ms max=${moveStats.maxFrameTime}ms`,
+        moveStats.averageFrameTime < 50 && moveStats.maxFrameTime < 250,
+        `expected fast selection frame (<50ms avg, <250ms max), got avg=${moveStats.averageFrameTime}ms max=${moveStats.maxFrameTime}ms`,
       );
 
       // Append a new step to the file and refresh

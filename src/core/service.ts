@@ -389,7 +389,8 @@ export class PeriscopeService implements PeriscopeApi {
   private startSandbox(): void {
     const enabled = this.opts.sandboxEnabled ?? process.env.PERISCOPE_SANDBOX !== '0';
     if (!enabled) {
-      this.setSandbox({ state: 'disabled', message: 'disabled by PERISCOPE_SANDBOX=0' });
+      const message = this.opts.sandboxEnabled === false ? 'disabled by --no-sandbox' : 'disabled by PERISCOPE_SANDBOX=0';
+      this.setSandbox({ state: 'disabled', message });
       return;
     }
     const podman = this.opts.podman !== undefined ? this.opts.podman : findPodman();
@@ -402,7 +403,7 @@ export class PeriscopeService implements PeriscopeApi {
       ingestor: this.ingestor!,
       store: this.store!,
       podman,
-      image: this.opts.sandboxImage ?? process.env.PERISCOPE_SANDBOX_IMAGE ?? DEFAULT_IMAGE,
+      image: this.opts.sandboxImage ?? (process.env.PERISCOPE_SANDBOX_IMAGE || DEFAULT_IMAGE),
       onStatus: (s) => this.setSandbox({ state: s.state, message: s.message }),
       onIngested: (ids) => this.notify(ids),
       onPresence: (procs) => {
