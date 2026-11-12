@@ -8,6 +8,10 @@ import type { IndexProgress } from '../core/service.ts';
 import type { ChangeNotice, PeriscopeApi, SandboxState, SessionRow } from '../core/types.ts';
 import type { ThemeOption } from '../cli/args.ts';
 import {
+  formatSandboxDetail,
+  formatSandboxStatus,
+} from '../view-model/sandbox-status.ts';
+import {
   applySessionListAction,
   buildSessionListItems,
   createSessionListState,
@@ -48,6 +52,8 @@ interface Palette {
   fg: string;
   mutedFg: string;
   liveFg: string;
+  errorFg: string;
+  detailBg: string;
   footerBg: string;
 }
 
@@ -62,6 +68,8 @@ function getPalette(mode: 'dark' | 'light'): Palette {
       fg: '#111827',
       mutedFg: '#6b7280',
       liveFg: '#15803d',
+      errorFg: '#b91c1c',
+      detailBg: '#fef2f2',
       footerBg: '#e5e7eb',
     };
   }
@@ -74,6 +82,8 @@ function getPalette(mode: 'dark' | 'light'): Palette {
     fg: '#f3f4f6',
     mutedFg: '#9ca3af',
     liveFg: '#4ade80',
+    errorFg: '#f87171',
+    detailBg: '#2b1c1f',
     footerBg: '#1f2937',
   };
 }
@@ -115,6 +125,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   let sessions: SessionRow[] = [];
   let listState: SessionListState = createSessionListState([]);
   let sandbox: SandboxState = { state: 'unknown' };
+  let showSandboxDetail = false;
   let progress: IndexProgress = options.initiallyIndexing
     ? { indexed: 0, total: 0, done: false }
     : { indexed: 0, total: 0, done: true };
@@ -131,12 +142,24 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     width: '100%',
     flexShrink: 0,
     backgroundColor: palette.headerBg,
+    onMouseDown: () => {
+      showSandboxDetail = !showSandboxDetail;
+      renderSandboxDetail();
+    },
   });
   const headerText = new TextRenderable(renderer, {
     content: '',
     fg: palette.headerFg,
   });
   headerBar.add(headerText);
+
+  const sandboxDetailBox = new BoxRenderable(renderer, {
+    flexDirection: 'column',
+    height: 0,
+    width: '100%',
+    flexShrink: 0,
+    backgroundColor: palette.detailBg,
+  });
 
   const listScroll = new ScrollBoxRenderable(renderer, {
     flexGrow: 1,
@@ -158,11 +181,13 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   footerBar.add(footerText);
 
   root.add(headerBar);
+  root.add(sandboxDetailBox);
   root.add(listScroll);
   root.add(footerBar);
   renderer.root.add(root);
 
   let rowNodes: BoxRenderable[] = [];
+  let sandboxDetailNodes: TextRenderable[] = [];
 
   const clearRows = () => {
     for (const node of rowNodes) {
@@ -172,8 +197,39 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     rowNodes = [];
   };
 
+  const clearSandboxDetail = () => {
+    for (const node of sandboxDetailNodes) {
+      sandboxDetailBox.remove(node);
+      node.destroyRecursively();
+    }
+    sandboxDetailNodes = [];
+  };
+
+  const renderSandboxDetail = () => {
+    clearSandboxDetail();
+    if (!showSandboxDetail) {
+      sandboxDetailBox.height = 0;
+      return;
+    }
+    const detail = formatSandboxDetail(sandbox);
+    const maxW = Math.max(40, renderer.terminalWidth - 2);
+    const titleNode = new TextRenderable(renderer, {
+      content: truncateText(` ${detail.title}  (S / Esc to close)`, maxW),
+      fg: sandbox.state === 'error' ? palette.errorFg : palette.headerFg,
+    });
+    const bodyNode = new TextRenderable(renderer, {
+      content: truncateText(` ${detail.body.replace(/\s+/g, ' ').trim()}`, maxW),
+      fg: palette.fg,
+    });
+    sandboxDetailBox.backgroundColor = sandbox.state === 'error' ? palette.detailBg : palette.headerBg;
+    sandboxDetailBox.height = 2;
+    sandboxDetailBox.add(titleNode);
+    sandboxDetailBox.add(bodyNode);
+    sandboxDetailNodes.push(titleNode, bodyNode);
+  };
+
   const renderHeader = () => {
-    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  sandbox: ${sandbox.state}  |  q quit`;
+    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}  |  q quit`;
   };
 
   const renderFooter = () => {
@@ -244,6 +300,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const renderAll = () => {
     if (disposed) return;
     renderHeader();
+    renderSandboxDetail();
     renderBody();
     renderFooter();
   };
@@ -303,6 +360,16 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       options.onQuit();
       return;
     }
+    if (!key.ctrl && !key.meta && ((key.shift && key.name === 's') || key.sequence === 'S')) {
+      showSandboxDetail = !showSandboxDetail;
+      renderSandboxDetail();
+      return;
+    }
+    if (showSandboxDetail && !key.ctrl && !key.meta && key.name === 'escape') {
+      showSandboxDetail = false;
+      renderSandboxDetail();
+      return;
+    }
     if (!progress.done) return;
     const action = keyToSessionListAction(key);
     if (action) dispatch(action);
@@ -326,6 +393,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   const offSandbox = options.service.onSandbox((s: SandboxState) => {
     sandbox = s;
     renderHeader();
+    if (showSandboxDetail) renderSandboxDetail();
   });
 
   renderAll();
@@ -342,6 +410,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       offChange();
       offSandbox();
       renderer.keyInput.off('keypress', onKeypress);
+      clearSandboxDetail();
       clearRows();
       renderer.root.remove(root);
       root.destroyRecursively();
