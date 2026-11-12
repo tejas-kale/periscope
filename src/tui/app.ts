@@ -3,9 +3,10 @@ import {
   ScrollBoxRenderable,
   TextRenderable,
   type CliRenderer,
+  type SyntaxStyle,
 } from '@opentui/core';
 import type { IndexProgress } from '../core/service.ts';
-import type { ChangeNotice, PeriscopeApi, SandboxState, SessionRow } from '../core/types.ts';
+import type { ChangeNotice, EventRow, PeriscopeApi, SandboxState, SessionRow } from '../core/types.ts';
 import type { ThemeOption } from '../cli/args.ts';
 import {
   applySessionListAction,
@@ -20,8 +21,32 @@ import {
   type SessionListItem,
   type SessionListState,
 } from '../view-model/session-list.ts';
+import {
+  appendTraceEvents,
+  applyTraceAction,
+  computeWindow,
+  createTraceState,
+  getSelectedNode,
+  getVisibleRows,
+  keyToTraceAction,
+  type TraceAction,
+  type TraceState,
+} from '../view-model/trace.ts';
+import { buildDetailModel, extractImageRefs } from '../view-model/detail.ts';
+import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
+import { detectCapabilities } from './adapter.ts';
+import {
+  createDetailSyntaxStyle,
+  getDetailPalette,
+  renderDetailContent,
+  type LoadedImage,
+} from './detail-pane.ts';
 
-export interface PeriscopeAppService extends Pick<PeriscopeApi, 'listSessions' | 'sandboxStatus' | 'onChange' | 'onSandbox'> {
+export interface PeriscopeAppService
+  extends Pick<
+    PeriscopeApi,
+    'listSessions' | 'getEvents' | 'getRaw' | 'readImage' | 'sandboxStatus' | 'onChange' | 'onSandbox'
+  > {
   onProgress?(cb: (p: IndexProgress) => void): () => void;
 }
 
@@ -39,6 +64,10 @@ export interface PeriscopeAppHandle {
   dispose(): void;
 }
 
+type FocusPane = 'sessions' | 'trace' | 'detail';
+
+const REFETCH_WINDOW = 200;
+
 interface Palette {
   headerBg: string;
   headerFg: string;
@@ -48,6 +77,9 @@ interface Palette {
   fg: string;
   mutedFg: string;
   liveFg: string;
+  errorFg: string;
+  borderFg: string;
+  focusBorderFg: string;
   footerBg: string;
 }
 
@@ -62,6 +94,9 @@ function getPalette(mode: 'dark' | 'light'): Palette {
       fg: '#111827',
       mutedFg: '#6b7280',
       liveFg: '#15803d',
+      errorFg: '#b91c1c',
+      borderFg: '#d1d5db',
+      focusBorderFg: '#2563eb',
       footerBg: '#e5e7eb',
     };
   }
@@ -74,6 +109,9 @@ function getPalette(mode: 'dark' | 'light'): Palette {
     fg: '#f3f4f6',
     mutedFg: '#9ca3af',
     liveFg: '#4ade80',
+    errorFg: '#f87171',
+    borderFg: '#374151',
+    focusBorderFg: '#60a5fa',
     footerBg: '#1f2937',
   };
 }
@@ -84,7 +122,7 @@ function truncateText(text: string, maxLen: number): string {
   return `${text.slice(0, maxLen - 1)}…`;
 }
 
-function formatRowText(item: SessionListItem, now: number, maxWidth: number): string {
+function formatSessionRowText(item: SessionListItem, now: number, maxWidth: number): string {
   if (item.kind === 'group') {
     const chevron = item.expanded ? '▾' : '▸';
     const more = item.expanded && item.hiddenCount > 0 ? ` (+${item.hiddenCount} more, m)` : '';
@@ -105,15 +143,56 @@ function formatRowText(item: SessionListItem, now: number, maxWidth: number): st
   return `${prefix}${title}${suffix}`;
 }
 
-/** Mount the Periscope terminal UI (indexing progress + grouped session list pane). */
+const KIND_ICON: Record<EventRow['kind'], string> = {
+  turn: '›',
+  reasoning: '◌',
+  text: '◆',
+  tool_call: '⚙',
+  tool_result: '↳',
+  error: '✕',
+  meta: '·',
+};
+
+function formatTraceRowText(row: Row, maxWidth: number): string {
+  const ev = row.node.ev;
+  const indent = '  '.repeat(row.depth);
+  const twisty = row.hasChildren ? (row.expanded ? '▾ ' : '▸ ') : '  ';
+  const icon = KIND_ICON[ev.kind] ?? '·';
+  const tool = ev.kind === 'tool_call' && ev.tool_name ? `${ev.tool_name} ` : '';
+  const dur = fmtDuration(row.node.duration);
+  const tok = row.node.tokensOut > 0 ? fmtTokens(row.node.tokensIn + row.node.tokensOut) : '';
+  const meta = [dur, tok].filter(Boolean).join(' ');
+  const suffix = meta ? `  ${meta}` : '';
+  const prefix = `${indent}${twisty}${icon} ${tool}`;
+  const bodyBudget = Math.max(8, maxWidth - prefix.length - suffix.length);
+  const body = truncateText(hint(ev), bodyBudget);
+  return `${prefix}${body}${suffix}`;
+}
+
+function decodeBase64DataUrl(dataUrl: string): Buffer | undefined {
+  const idx = dataUrl.indexOf(',');
+  if (idx === -1) return undefined;
+  return Buffer.from(dataUrl.slice(idx + 1), 'base64');
+}
+
+/** Mount the Periscope terminal UI (session list + windowed trace tree + detail pane). */
 export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOptions): PeriscopeAppHandle {
+  const support = detectCapabilities(renderer);
   const resolvedTheme: 'dark' | 'light' =
     options.theme === 'auto' ? (renderer.themeMode ?? 'dark') : options.theme;
   const palette = getPalette(resolvedTheme);
+  const detailPalette = getDetailPalette(resolvedTheme);
+  const syntaxStyle: SyntaxStyle = createDetailSyntaxStyle(renderer, resolvedTheme);
   const clock = options.clock ?? Date.now;
 
   let sessions: SessionRow[] = [];
   let listState: SessionListState = createSessionListState([]);
+  let activeSessionId: string | null = null;
+  let traceState: TraceState = createTraceState([]);
+  let focus: FocusPane = 'sessions';
+  let loadedImages: LoadedImage[] = [];
+  let imageLoadGen = 0;
+
   let sandbox: SandboxState = { state: 'unknown' };
   let progress: IndexProgress = options.initiallyIndexing
     ? { indexed: 0, total: 0, done: false }
@@ -138,12 +217,82 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   });
   headerBar.add(headerText);
 
+  const bodyRow = new BoxRenderable(renderer, {
+    flexDirection: 'row',
+    flexGrow: 1,
+    width: '100%',
+  });
+
+  const sessionsPane = new BoxRenderable(renderer, {
+    flexDirection: 'column',
+    width: '100%',
+    height: '100%',
+    onMouseDown: () => {
+      if (focus !== 'sessions') {
+        focus = 'sessions';
+        renderHeader();
+        updatePaneBorders();
+      }
+    },
+  });
+
   const listScroll = new ScrollBoxRenderable(renderer, {
     flexGrow: 1,
     width: '100%',
     scrollY: true,
     scrollX: false,
   });
+  sessionsPane.add(listScroll);
+
+  const tracePane = new BoxRenderable(renderer, {
+    flexDirection: 'column',
+    width: 0,
+    height: '100%',
+    border: ['left'],
+    borderColor: palette.borderFg,
+    visible: false,
+    onMouseDown: () => {
+      if (focus !== 'trace') {
+        focus = 'trace';
+        renderHeader();
+        updatePaneBorders();
+      }
+    },
+    onMouseScroll: (e) => {
+      if (e.scroll?.direction === 'up') dispatchTrace({ type: 'scrollBy', delta: -3 });
+      else if (e.scroll?.direction === 'down') dispatchTrace({ type: 'scrollBy', delta: 3 });
+    },
+  });
+
+  const detailPane = new BoxRenderable(renderer, {
+    flexDirection: 'column',
+    width: 0,
+    height: '100%',
+    border: ['left'],
+    borderColor: palette.borderFg,
+    visible: false,
+    onMouseDown: () => {
+      if (focus !== 'detail') {
+        focus = 'detail';
+        renderHeader();
+        updatePaneBorders();
+      }
+    },
+  });
+
+  const detailScroll = new ScrollBoxRenderable(renderer, {
+    flexGrow: 1,
+    width: '100%',
+    paddingLeft: 1,
+    paddingRight: 1,
+    scrollY: true,
+    scrollX: false,
+  });
+  detailPane.add(detailScroll);
+
+  bodyRow.add(sessionsPane);
+  bodyRow.add(tracePane);
+  bodyRow.add(detailPane);
 
   const footerBar = new BoxRenderable(renderer, {
     height: 1,
@@ -158,22 +307,56 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   footerBar.add(footerText);
 
   root.add(headerBar);
-  root.add(listScroll);
+  root.add(bodyRow);
   root.add(footerBar);
   renderer.root.add(root);
 
-  let rowNodes: BoxRenderable[] = [];
+  let sessionRowNodes: BoxRenderable[] = [];
+  // Windowed trace tree nodes keyed by event ID
+  const traceRowNodes = new Map<string, { box: BoxRenderable; text: TextRenderable }>();
 
-  const clearRows = () => {
-    for (const node of rowNodes) {
+  const clearSessionRows = () => {
+    for (const node of sessionRowNodes) {
       listScroll.remove(node);
       node.destroyRecursively();
     }
-    rowNodes = [];
+    sessionRowNodes = [];
+  };
+
+  const clearTraceRows = () => {
+    for (const entry of traceRowNodes.values()) {
+      tracePane.remove(entry.box);
+      entry.box.destroyRecursively();
+    }
+    traceRowNodes.clear();
+  };
+
+  const updatePaneBorders = () => {
+    tracePane.borderColor = focus === 'trace' ? palette.focusBorderFg : palette.borderFg;
+    detailPane.borderColor = focus === 'detail' ? palette.focusBorderFg : palette.borderFg;
+  };
+
+  const updatePaneVisibility = () => {
+    const hasSession = activeSessionId !== null;
+    if (hasSession) {
+      sessionsPane.width = '26%';
+      tracePane.width = '34%';
+      tracePane.visible = true;
+      detailPane.width = '40%';
+      detailPane.visible = true;
+    } else {
+      sessionsPane.width = '100%';
+      tracePane.width = 0;
+      tracePane.visible = false;
+      detailPane.width = 0;
+      detailPane.visible = false;
+    }
+    updatePaneBorders();
   };
 
   const renderHeader = () => {
-    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  sandbox: ${sandbox.state}  |  q quit`;
+    const focusLabel = activeSessionId ? `  |  pane: ${focus} (Tab)` : '';
+    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  sandbox: ${sandbox.state}${focusLabel}  |  q quit`;
   };
 
   const renderFooter = () => {
@@ -187,16 +370,17 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
-  const renderBody = () => {
-    clearRows();
+  const renderSessionsPane = () => {
+    clearSessionRows();
     if (!progress.done) {
       const box = new BoxRenderable(renderer, { height: 1, width: '100%' });
-      const label = progress.total > 0
-        ? ` Indexing sessions... ${progress.indexed} / ${progress.total}`
-        : ' Indexing sessions...';
+      const label =
+        progress.total > 0
+          ? ` Indexing sessions... ${progress.indexed} / ${progress.total}`
+          : ' Indexing sessions...';
       box.add(new TextRenderable(renderer, { content: label, fg: palette.fg }));
       listScroll.add(box);
-      rowNodes.push(box);
+      sessionRowNodes.push(box);
       return;
     }
 
@@ -204,12 +388,16 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       const box = new BoxRenderable(renderer, { height: 1, width: '100%' });
       box.add(new TextRenderable(renderer, { content: ' No sessions found.', fg: palette.mutedFg }));
       listScroll.add(box);
-      rowNodes.push(box);
+      sessionRowNodes.push(box);
       return;
     }
 
     const now = clock();
     const items = buildSessionListItems(sessions, listState);
+    const paneWidth = activeSessionId
+      ? Math.max(20, Math.floor(renderer.terminalWidth * 0.26) - 2)
+      : Math.max(40, renderer.terminalWidth - 2);
+
     for (let i = 0; i < items.length; i++) {
       const item = items[i]!;
       const isCursor = listState.cursorKey === item.key;
@@ -228,27 +416,158 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
         flexShrink: 0,
         backgroundColor: bg,
         onMouseDown: () => {
-          dispatch({ type: 'clickItem', key: item.key });
+          focus = 'sessions';
+          dispatchSessionList({ type: 'clickItem', key: item.key });
         },
       });
       const rowText = new TextRenderable(renderer, {
-        content: formatRowText(item, now, Math.max(40, renderer.terminalWidth - 2)),
+        content: formatSessionRowText(item, now, paneWidth),
         fg,
       });
       rowBox.add(rowText);
       listScroll.add(rowBox);
-      rowNodes.push(rowBox);
+      sessionRowNodes.push(rowBox);
+    }
+  };
+
+  const traceViewportHeight = () => Math.max(1, renderer.terminalHeight - 2);
+
+  const renderTracePane = () => {
+    if (!activeSessionId) {
+      clearTraceRows();
+      return;
+    }
+    const rows = getVisibleRows(traceState);
+    const vpHeight = traceViewportHeight();
+    const { visibleRows } = computeWindow(rows, traceState.scrollOffset, vpHeight, 4);
+    const paneWidth = Math.max(24, Math.floor(renderer.terminalWidth * 0.34) - 2);
+
+    const keepIds = new Set(visibleRows.map((r) => r.node.ev.id));
+    for (const [id, entry] of traceRowNodes.entries()) {
+      if (!keepIds.has(id)) {
+        tracePane.remove(entry.box);
+        entry.box.destroyRecursively();
+        traceRowNodes.delete(id);
+      }
+    }
+
+    for (let i = 0; i < visibleRows.length; i++) {
+      const row = visibleRows[i]!;
+      const id = row.node.ev.id;
+      const isSel = traceState.selectedId === id;
+      const isErr = row.node.ev.kind === 'error' || row.node.failed;
+      const bg = isSel ? palette.selectedBg : undefined;
+      const fg = isErr ? palette.errorFg : palette.fg;
+      const label = formatTraceRowText(row, paneWidth);
+
+      let entry = traceRowNodes.get(id);
+      if (!entry) {
+        const box = new BoxRenderable(renderer, {
+          height: 1,
+          width: '100%',
+          flexShrink: 0,
+          backgroundColor: bg,
+          onMouseDown: () => {
+            focus = 'trace';
+            dispatchTrace({ type: 'selectId', id, scrollIntoView: false });
+          },
+        });
+        const text = new TextRenderable(renderer, { content: label, fg });
+        box.add(text);
+        tracePane.add(box, i);
+        entry = { box, text };
+        traceRowNodes.set(id, entry);
+      } else {
+        entry.box.backgroundColor = bg ?? 'transparent';
+        entry.text.content = label;
+        entry.text.fg = fg;
+        if (tracePane.getChildren()[i] !== entry.box) {
+          tracePane.add(entry.box, i);
+        }
+      }
+    }
+  };
+
+  const renderDetailPane = () => {
+    if (!activeSessionId) return;
+    const node = getSelectedNode(traceState);
+    const outputExpanded = node ? (traceState.outputExpanded.get(node.ev.id) ?? false) : false;
+    const model = buildDetailModel(node, {
+      rawMode: traceState.rawMode,
+      outputExpanded,
+    });
+    renderDetailContent({
+      renderer,
+      scrollBox: detailScroll,
+      model,
+      images: loadedImages,
+      supportsImages: support.images,
+      palette: detailPalette,
+      syntaxStyle,
+      onToggleRaw: () => dispatchTrace({ type: 'toggleRaw' }),
+      onToggleOutputExpand: () => {
+        if (node) dispatchTrace({ type: 'toggleOutputExpand', id: node.ev.id });
+      },
+    });
+  };
+
+  const loadImagesForSelectedStep = async () => {
+    const node = getSelectedNode(traceState);
+    const gen = ++imageLoadGen;
+    loadedImages = [];
+    if (!node) return;
+    const model = buildDetailModel(node, { rawMode: traceState.rawMode, outputExpanded: false });
+    const found: LoadedImage[] = [];
+    for (const id of model.imageEventIds) {
+      try {
+        const raw = await options.service.getRaw(id);
+        if (disposed || gen !== imageLoadGen) return;
+        const refs = extractImageRefs(raw);
+        for (const ref of refs) {
+          if (ref.kind === 'base64') {
+            found.push({ ref, buffer: Buffer.from(ref.data, 'base64') });
+          } else if (ref.kind === 'uri') {
+            const dataUrl = await options.service.readImage(ref.uri);
+            if (disposed || gen !== imageLoadGen) return;
+            found.push({ ref, buffer: dataUrl ? decodeBase64DataUrl(dataUrl) : undefined });
+          }
+        }
+      } catch {
+        // Ignore raw/image read failures for individual steps
+      }
+    }
+    if (disposed || gen !== imageLoadGen) return;
+    if (found.length > 0) {
+      loadedImages = found;
+      renderDetailPane();
     }
   };
 
   const renderAll = () => {
     if (disposed) return;
+    updatePaneVisibility();
     renderHeader();
-    renderBody();
+    renderSessionsPane();
+    renderTracePane();
+    renderDetailPane();
     renderFooter();
   };
 
-  const dispatch = (action: Parameters<typeof applySessionListAction>[2]) => {
+  const openSession = async (session: SessionRow) => {
+    activeSessionId = session.id;
+    focus = 'trace';
+    loadedImages = [];
+    traceState = createTraceState([]);
+    renderAll();
+
+    const events = await options.service.getEvents(session.id);
+    if (disposed || activeSessionId !== session.id) return;
+    traceState = createTraceState(events);
+    renderAll();
+    void loadImagesForSelectedStep();
+  };
+
+  const dispatchSessionList = (action: Parameters<typeof applySessionListAction>[2]) => {
     const prevSelected = listState.selectedSessionId;
     const nextState = applySessionListAction(listState, sessions, action);
     listState = nextState;
@@ -264,7 +583,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       }
     }
 
-    renderBody();
+    renderSessionsPane();
     renderFooter();
 
     if (
@@ -275,7 +594,28 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
         action.type === 'clickItem')
     ) {
       const selected = sessions.find((s) => s.id === nextState.selectedSessionId);
-      if (selected) options.onSelectSession?.(selected);
+      if (selected) {
+        options.onSelectSession?.(selected);
+        void openSession(selected);
+      }
+    }
+  };
+
+  const dispatchTrace = (action: TraceAction) => {
+    const prevSel = traceState.selectedId;
+    const prevRaw = traceState.rawMode;
+    const prevExp = prevSel ? traceState.outputExpanded.get(prevSel) : undefined;
+    traceState = applyTraceAction(traceState, action, traceViewportHeight());
+    renderTracePane();
+
+    const nextSel = traceState.selectedId;
+    const nextExp = nextSel ? traceState.outputExpanded.get(nextSel) : undefined;
+    if (nextSel !== prevSel || traceState.rawMode !== prevRaw || nextExp !== prevExp) {
+      if (nextSel !== prevSel) {
+        loadedImages = [];
+        void loadImagesForSelectedStep();
+      }
+      renderDetailPane();
     }
   };
 
@@ -291,6 +631,14 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     if (!listState.cursorKey && sessions.length > 0) {
       listState = createSessionListState(sessions);
     }
+    if (activeSessionId) {
+      const maxSeq = traceState.events.length
+        ? traceState.events[traceState.events.length - 1]!.seq
+        : -1;
+      const fresh = await options.service.getEvents(activeSessionId, maxSeq - REFETCH_WINDOW);
+      if (disposed) return;
+      traceState = appendTraceEvents(traceState, fresh);
+    }
     renderAll();
   };
 
@@ -304,20 +652,93 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       return;
     }
     if (!progress.done) return;
-    const action = keyToSessionListAction(key);
-    if (action) dispatch(action);
+
+    if (!key.ctrl && !key.meta && key.name === 'tab' && activeSessionId) {
+      const order: FocusPane[] = ['sessions', 'trace', 'detail'];
+      const idx = order.indexOf(focus);
+      focus = order[(idx + (key.shift ? order.length - 1 : 1)) % order.length]!;
+      renderHeader();
+      updatePaneBorders();
+      return;
+    }
+
+    // 1-9 quick-open works across panes
+    if (!key.ctrl && !key.meta && key.name && /^[1-9]$/.test(key.name)) {
+      dispatchSessionList({ type: 'quickOpen', index: Number(key.name) });
+      return;
+    }
+
+    if (focus === 'sessions') {
+      const action = keyToSessionListAction(key);
+      if (action) dispatchSessionList(action);
+      return;
+    }
+
+    if (focus === 'trace') {
+      if (!key.ctrl && !key.meta && key.name === 'e') {
+        const node = getSelectedNode(traceState);
+        if (node) dispatchTrace({ type: 'toggleOutputExpand', id: node.ev.id });
+        return;
+      }
+      if (!key.ctrl && !key.meta && key.name === 'return') {
+        focus = 'detail';
+        renderHeader();
+        updatePaneBorders();
+        return;
+      }
+      const action = keyToTraceAction(key);
+      if (action) dispatchTrace(action);
+      return;
+    }
+
+    if (focus === 'detail') {
+      if (!key.ctrl && !key.meta) {
+        if (key.name === 'escape' || key.name === 'esc' || key.sequence === '\x1b' || key.name === 'h') {
+          focus = 'trace';
+          renderHeader();
+          updatePaneBorders();
+          return;
+        }
+        if (key.name === 'r') {
+          dispatchTrace({ type: 'toggleRaw' });
+          return;
+        }
+        if (key.name === 'e') {
+          const node = getSelectedNode(traceState);
+          if (node) dispatchTrace({ type: 'toggleOutputExpand', id: node.ev.id });
+          return;
+        }
+        if (key.name === 'j' || key.name === 'down') {
+          detailScroll.scrollBy(2);
+          return;
+        }
+        if (key.name === 'k' || key.name === 'up') {
+          detailScroll.scrollBy(-2);
+          return;
+        }
+        if (key.name === 'pagedown') {
+          detailScroll.scrollBy(10);
+          return;
+        }
+        if (key.name === 'pageup') {
+          detailScroll.scrollBy(-10);
+          return;
+        }
+      }
+    }
   };
 
   renderer.keyInput.on('keypress', onKeypress);
 
-  const offProgress = options.service.onProgress?.((p) => {
-    progress = p;
-    if (p.done) {
-      void refresh();
-    } else {
-      renderAll();
-    }
-  }) ?? (() => {});
+  const offProgress =
+    options.service.onProgress?.((p) => {
+      progress = p;
+      if (p.done) {
+        void refresh();
+      } else {
+        renderAll();
+      }
+    }) ?? (() => {});
 
   const offChange = options.service.onChange((_n: ChangeNotice) => {
     void refresh();
@@ -342,7 +763,9 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       offChange();
       offSandbox();
       renderer.keyInput.off('keypress', onKeypress);
-      clearRows();
+      clearSessionRows();
+      clearTraceRows();
+      syntaxStyle.destroy();
       renderer.root.remove(root);
       root.destroyRecursively();
     },
