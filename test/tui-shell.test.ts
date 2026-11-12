@@ -65,6 +65,9 @@ function createFakeAdapter(renderer: FakeRenderer): TuiAdapter<FakeRenderer> {
     createTextNode(_r: FakeRenderer, text: string) {
       return { kind: 'text', text };
     },
+    copyToClipboard(_r: FakeRenderer, _text: string) {
+      return true;
+    },
   };
 }
 

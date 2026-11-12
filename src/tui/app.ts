@@ -63,8 +63,16 @@ import {
   type TraceState,
 } from '../view-model/trace.ts';
 import { buildDetailModel, extractImageRefs } from '../view-model/detail.ts';
+import {
+  copyWithFallback,
+  extractCodeBlockText,
+  extractDiffText,
+  extractStepCopyText,
+  keyToCopyAction,
+  type CopyAction,
+} from '../view-model/clipboard.ts';
 import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
-import { detectCapabilities } from './adapter.ts';
+import { createOpenTuiAdapter, type TuiAdapter } from './adapter.ts';
 import {
   createDetailSyntaxStyle,
   getDetailPalette,
@@ -82,6 +90,7 @@ export interface PeriscopeAppService
 
 export interface PeriscopeAppOptions {
   service: PeriscopeAppService;
+  adapter?: Pick<TuiAdapter<CliRenderer>, 'detectCapabilities' | 'copyToClipboard'>;
   theme: ThemeOption;
   clock?: () => number;
   initiallyIndexing?: boolean;
@@ -246,7 +255,8 @@ function snippetToStyledText(segments: SnippetSegment[], palette: Palette, maxWi
 
 /** Mount the Periscope terminal UI (session list + windowed trace tree + detail pane). */
 export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOptions): PeriscopeAppHandle {
-  const support = detectCapabilities(renderer);
+  const adapter = options.adapter ?? createOpenTuiAdapter();
+  const support = adapter.detectCapabilities(renderer);
   const resolvedTheme: 'dark' | 'light' =
     options.theme === 'auto' ? (renderer.themeMode ?? 'dark') : options.theme;
   const palette = getPalette(resolvedTheme);
@@ -277,6 +287,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
   let sandbox: SandboxState = { state: 'unknown' };
   let showSandboxDetail = false;
+  let statusMessage: string | null = null;
   let progress: IndexProgress = options.initiallyIndexing
     ? { indexed: 0, total: 0, done: false }
     : { indexed: 0, total: 0, done: true };
@@ -514,6 +525,10 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const renderFooter = () => {
+    if (statusMessage) {
+      footerText.content = ` ${statusMessage}`;
+      return;
+    }
     const selected = listState.selectedSessionId
       ? sessionsById.get(listState.selectedSessionId)
       : undefined;
@@ -546,6 +561,49 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     } else {
       searchBar.height = 0;
       searchBarText.content = '';
+    }
+  };
+
+  const performCopy = (text: string | null, label: string, emptyMessage: string) => {
+    if (!text) {
+      statusMessage = emptyMessage;
+      renderFooter();
+      return;
+    }
+    const result = copyWithFallback(text, {
+      label,
+      osc52Supported: support.osc52,
+      copyOsc52: (value) => adapter.copyToClipboard(renderer, value),
+    });
+    statusMessage = result.statusMessage;
+    renderFooter();
+  };
+
+  const handleCopyAction = (action: CopyAction) => {
+    if (action.type === 'copySessionId' || action.type === 'copySourcePath') {
+      const target =
+        (activeSessionId ? sessions.find((s) => s.id === activeSessionId) : undefined) ??
+        (listState.selectedSessionId ? sessions.find((s) => s.id === listState.selectedSessionId) : undefined);
+      if (!target) {
+        statusMessage = 'No session selected';
+        renderFooter();
+        return;
+      }
+      if (action.type === 'copySessionId') {
+        performCopy(target.id, 'session ID', 'No session ID');
+      } else {
+        performCopy(target.source_path, 'source path', 'No source path');
+      }
+      return;
+    }
+
+    const node = getSelectedNode(traceState);
+    if (action.type === 'copyText') {
+      performCopy(extractStepCopyText(node), 'step text', 'No step text to copy');
+    } else if (action.type === 'copyCode') {
+      performCopy(extractCodeBlockText(node), 'code block', 'No code block in selected step');
+    } else if (action.type === 'copyDiff') {
+      performCopy(extractDiffText(node), 'diff', 'No diff in selected step');
     }
   };
 
@@ -873,6 +931,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const dispatchSessionList = (action: Parameters<typeof applySessionListAction>[2]) => {
+    statusMessage = null;
     const prevSelected = listState.selectedSessionId;
     const nextState = applySessionListAction(listState, sessions, action);
     listState = nextState;
@@ -907,11 +966,14 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const dispatchTrace = (action: TraceAction) => {
+    const hadStatus = statusMessage !== null;
+    statusMessage = null;
     const prevSel = traceState.selectedId;
     const prevRaw = traceState.rawMode;
     const prevExp = prevSel ? traceState.outputExpanded.get(prevSel) : undefined;
     traceState = applyTraceAction(traceState, action, traceViewportHeight());
     renderTracePane();
+    if (hadStatus) renderFooter();
 
     const nextSel = traceState.selectedId;
     const nextExp = nextSel ? traceState.outputExpanded.get(nextSel) : undefined;
@@ -1137,6 +1199,18 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       }
       dispatchSessionList({ type: 'quickOpen', index: n });
       return;
+    }
+
+    const copyAction = keyToCopyAction(key);
+    if (copyAction) {
+      if (copyAction.type === 'copySessionId' || copyAction.type === 'copySourcePath') {
+        handleCopyAction(copyAction);
+        return;
+      }
+      if (activeSessionId && (focus === 'trace' || focus === 'detail')) {
+        handleCopyAction(copyAction);
+        return;
+      }
     }
 
     if (focus === 'sessions') {
