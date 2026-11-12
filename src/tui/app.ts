@@ -65,6 +65,16 @@ import {
 } from '../view-model/trace.ts';
 import { buildDetailModel, extractImageRefs } from '../view-model/detail.ts';
 import { buildContextGroups, computeSessionStats } from '../view-model/stats-context.ts';
+import { formatHelpLines } from '../view-model/keymap.ts';
+import {
+  computePaneWidths,
+  createLayoutState,
+  resetPaneWidths,
+  resizePane,
+  toggleDetailZoom,
+  type FocusPane,
+  type LayoutState,
+} from '../view-model/layout.ts';
 import {
   copyWithFallback,
   extractCodeBlockText,
@@ -107,9 +117,7 @@ export interface PeriscopeAppHandle {
   dispose(): void;
 }
 
-type FocusPane = 'sessions' | 'trace' | 'detail';
 type DetailMode = 'step' | 'stats' | 'context';
-
 const REFETCH_WINDOW = 200;
 
 interface Palette {
@@ -191,9 +199,13 @@ function formatSessionRowText(item: SessionListItem, now: number, maxWidth: numb
   const meta = [agent, host, age].filter(Boolean).join(' · ');
   const suffix = `  |  ${meta}`;
   const prefix = `  ${quick}${badgePart}`;
+  const rawTitle = (s.title || s.id).replace(/\s+/g, ' ').trim();
+  if (maxWidth < 38) {
+    return truncateText(`${prefix}${rawTitle}`, maxWidth);
+  }
   const titleBudget = Math.max(8, maxWidth - prefix.length - suffix.length);
-  const title = truncateText((s.title || s.id).replace(/\s+/g, ' ').trim(), titleBudget);
-  return `${prefix}${title}${suffix}`;
+  const title = truncateText(rawTitle, titleBudget);
+  return truncateText(`${prefix}${title}${suffix}`, maxWidth);
 }
 
 const KIND_ICON: Record<EventRow['kind'], string> = {
@@ -219,7 +231,7 @@ function formatTraceRowText(row: Row, maxWidth: number): string {
   const prefix = `${indent}${twisty}${icon} ${tool}`;
   const bodyBudget = Math.max(8, maxWidth - prefix.length - suffix.length);
   const body = truncateText(hint(ev), bodyBudget);
-  return `${prefix}${body}${suffix}`;
+  return truncateText(`${prefix}${body}${suffix}`, maxWidth);
 }
 
 function decodeBase64DataUrl(dataUrl: string): Buffer | undefined {
@@ -262,11 +274,12 @@ function snippetToStyledText(segments: SnippetSegment[], palette: Palette, maxWi
 export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOptions): PeriscopeAppHandle {
   const adapter = options.adapter ?? createOpenTuiAdapter();
   const support = adapter.detectCapabilities(renderer);
-  const resolvedTheme: 'dark' | 'light' =
-    options.theme === 'auto' ? (renderer.themeMode ?? 'dark') : options.theme;
-  const palette = getPalette(resolvedTheme);
-  const detailPalette = getDetailPalette(resolvedTheme);
-  const syntaxStyle: SyntaxStyle = createDetailSyntaxStyle(renderer, resolvedTheme);
+  let themeSetting: ThemeOption = options.theme;
+  let resolvedTheme: 'dark' | 'light' =
+    themeSetting === 'auto' ? (renderer.themeMode ?? 'dark') : themeSetting;
+  let palette = getPalette(resolvedTheme);
+  let detailPalette = getDetailPalette(resolvedTheme);
+  let syntaxStyle: SyntaxStyle = createDetailSyntaxStyle(renderer, resolvedTheme);
   const clock = options.clock ?? Date.now;
 
   let sessions: SessionRow[] = [];
@@ -290,11 +303,13 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   let detailMode: DetailMode = 'step';
   let contextRawById = new Map<string, string | null>();
   let contextLoadGen = 0;
+  let layoutState: LayoutState = createLayoutState();
   let loadedImages: LoadedImage[] = [];
   let imageLoadGen = 0;
 
   let sandbox: SandboxState = { state: 'unknown' };
   let showSandboxDetail = false;
+  let showHelp = false;
   let statusMessage: string | null = null;
   let progress: IndexProgress = options.initiallyIndexing
     ? { indexed: 0, total: 0, done: false }
@@ -470,10 +485,41 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   root.add(sandboxDetailBox);
   root.add(bodyRow);
   root.add(footerBar);
+
+  const helpOverlay = new BoxRenderable(renderer, {
+    position: 'absolute',
+    zIndex: 50,
+    top: 2,
+    left: 4,
+    width: 64,
+    height: 20,
+    flexDirection: 'column',
+    border: true,
+    borderColor: palette.focusBorderFg,
+    backgroundColor: palette.headerBg,
+    paddingLeft: 1,
+    paddingRight: 1,
+    visible: false,
+  });
+  const helpTitle = new TextRenderable(renderer, {
+    content: 'Keyboard Shortcuts  (? / Esc to close)',
+    fg: palette.groupFg,
+    height: 1,
+  });
+  const helpScroll = new ScrollBoxRenderable(renderer, {
+    flexGrow: 1,
+    width: '100%',
+    scrollY: true,
+    scrollX: false,
+  });
+  helpOverlay.add(helpTitle);
+  helpOverlay.add(helpScroll);
+  root.add(helpOverlay);
   renderer.root.add(root);
 
   let sessionRowNodes: BoxRenderable[] = [];
   let sandboxDetailNodes: TextRenderable[] = [];
+  let helpLineNodes: TextRenderable[] = [];
   // Windowed trace tree nodes keyed by event ID
   const traceRowNodes = new Map<string, { box: BoxRenderable; text: TextRenderable }>();
 
@@ -500,18 +546,28 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
 
   const updatePaneVisibility = () => {
     const hasSession = activeSessionId !== null;
-    if (hasSession) {
-      sessionsPane.width = '26%';
-      tracePane.width = '34%';
-      tracePane.visible = true;
-      detailPane.width = '40%';
-      detailPane.visible = true;
-    } else {
-      sessionsPane.width = '100%';
+    const widths = computePaneWidths(renderer.terminalWidth, layoutState, hasSession);
+    if (!hasSession) {
+      sessionsPane.width = widths.sessions;
+      sessionsPane.visible = true;
       tracePane.width = 0;
       tracePane.visible = false;
       detailPane.width = 0;
       detailPane.visible = false;
+    } else if (layoutState.detailZoomed) {
+      sessionsPane.width = 0;
+      sessionsPane.visible = false;
+      tracePane.width = 0;
+      tracePane.visible = false;
+      detailPane.width = widths.detail;
+      detailPane.visible = true;
+    } else {
+      sessionsPane.width = widths.sessions;
+      sessionsPane.visible = true;
+      tracePane.width = widths.trace;
+      tracePane.visible = true;
+      detailPane.width = widths.detail;
+      detailPane.visible = true;
     }
     updatePaneBorders();
   };
@@ -522,6 +578,44 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       node.destroyRecursively();
     }
     sandboxDetailNodes = [];
+  };
+
+  const clearHelpLines = () => {
+    for (const node of helpLineNodes) {
+      helpScroll.remove(node);
+      node.destroyRecursively();
+    }
+    helpLineNodes = [];
+  };
+
+  const renderHelpOverlay = () => {
+    clearHelpLines();
+    if (!showHelp) {
+      helpOverlay.visible = false;
+      return;
+    }
+    const w = Math.min(72, Math.max(40, renderer.terminalWidth - 4));
+    const h = Math.min(36, Math.max(12, renderer.terminalHeight - 4));
+    helpOverlay.width = w;
+    helpOverlay.height = h;
+    helpOverlay.left = Math.max(0, Math.floor((renderer.terminalWidth - w) / 2));
+    helpOverlay.top = Math.max(0, Math.floor((renderer.terminalHeight - h) / 2));
+    helpOverlay.backgroundColor = palette.headerBg;
+    helpOverlay.borderColor = palette.focusBorderFg;
+    helpTitle.content = truncateText('Keyboard Shortcuts  (? / Esc to close)', Math.max(20, w - 4));
+    helpTitle.fg = palette.groupFg;
+
+    const lines = formatHelpLines(Math.max(20, w - 4));
+    for (const line of lines) {
+      const isSection = line.length > 0 && !line.startsWith('  ');
+      const node = new TextRenderable(renderer, {
+        content: line,
+        fg: isSection ? palette.groupFg : palette.fg,
+      });
+      helpScroll.add(node);
+      helpLineNodes.push(node);
+    }
+    helpOverlay.visible = true;
   };
 
   const renderSandboxDetail = () => {
@@ -548,28 +642,42 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const renderHeader = () => {
-    const focusLabel = activeSessionId ? `  |  pane: ${focus} (Tab)` : '';
+    const w = renderer.terminalWidth;
+    const zoomTag = layoutState.detailZoomed ? ' [zoom]' : '';
+    const followTag = activeSessionId
+      ? traceState.follow
+        ? ' [FOLLOW]'
+        : ''
+      : '';
+    if (w <= 95) {
+      const panePart = activeSessionId ? ` | ${focus}${zoomTag}${followTag}` : '';
+      const raw = ` Periscope | ${resolvedTheme} | ${formatSandboxStatus(sandbox)}${panePart} | ? | q`;
+      headerText.content = truncateText(raw, w);
+      return;
+    }
+    const focusLabel = activeSessionId ? `  |  pane: ${focus}${zoomTag} (Tab)` : '';
     const followLabel = activeSessionId
       ? traceState.follow
         ? '  |  [FOLLOW] (f)'
         : '  |  follow: off (f)'
       : '';
-    headerText.content = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}${focusLabel}${followLabel}  |  q quit`;
+    const raw = ` Periscope  |  theme: ${resolvedTheme}  |  ${formatSandboxStatus(sandbox)}${focusLabel}${followLabel}  |  ? help  |  q quit`;
+    headerText.content = truncateText(raw, w);
   };
 
   const renderFooter = () => {
+    const w = renderer.terminalWidth;
     if (statusMessage) {
-      footerText.content = ` ${statusMessage}`;
+      footerText.content = truncateText(` ${statusMessage}`, w);
       return;
     }
     const selected = listState.selectedSessionId
       ? sessionsById.get(listState.selectedSessionId)
       : undefined;
-    if (selected) {
-      footerText.content = ` Selected: ${selected.title || selected.id} (${formatAgent(selected.agent)}, ${formatHost(selected.host)})`;
-    } else {
-      footerText.content = ` ${formatFilterBar(filter, dateLabel)}  |  ↑/↓ Nav  Enter Open`;
-    }
+    const raw = selected
+      ? ` Selected: ${selected.title || selected.id} (${formatAgent(selected.agent)}, ${formatHost(selected.host)})`
+      : ` ${formatFilterBar(filter, dateLabel)}  |  ↑/↓ Nav  Enter Open  Help: ?`;
+    footerText.content = truncateText(raw, w);
   };
 
   const renderFilterAndSearchBars = (paneWidth: number) => {
@@ -641,9 +749,8 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const renderSessionsPane = () => {
-    const paneWidth = activeSessionId
-      ? Math.max(20, Math.floor(renderer.terminalWidth * 0.26) - 2)
-      : Math.max(40, renderer.terminalWidth - 2);
+    const widths = computePaneWidths(renderer.terminalWidth, layoutState, activeSessionId !== null);
+    const paneWidth = Math.max(12, widths.sessions - 2);
     renderFilterAndSearchBars(paneWidth);
     clearSessionRows();
 
@@ -776,10 +883,14 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
-  const traceViewportHeight = () => Math.max(1, renderer.terminalHeight - 3);
+  const traceViewportHeight = () => {
+    const detailH = showSandboxDetail && typeof sandboxDetailBox.height === 'number' ? sandboxDetailBox.height : 0;
+    return Math.max(1, renderer.terminalHeight - 3 - detailH);
+  };
 
   const renderTraceToolbar = () => {
-    const paneWidth = Math.max(24, Math.floor(renderer.terminalWidth * 0.34) - 2);
+    const widths = computePaneWidths(renderer.terminalWidth, layoutState, activeSessionId !== null);
+    const paneWidth = Math.max(16, widths.trace - 2);
     const showLabel = formatShowFilter(traceState.show);
     const collapseLabel = traceState.collapseAll ? 'Expand(z)' : 'Collapse(z)';
     const statsLabel = detailMode === 'stats' ? '[Stats(s)]' : 'Stats(s)';
@@ -791,7 +902,7 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
   };
 
   const renderTracePane = () => {
-    if (!activeSessionId) {
+    if (!activeSessionId || layoutState.detailZoomed) {
       clearTraceRows();
       traceToolbarText.content = '';
       return;
@@ -800,7 +911,8 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     const rows = getVisibleRows(traceState);
     const vpHeight = traceViewportHeight();
     const { visibleRows } = computeWindow(rows, traceState.scrollOffset, vpHeight, 4);
-    const paneWidth = Math.max(24, Math.floor(renderer.terminalWidth * 0.34) - 2);
+    const widths = computePaneWidths(renderer.terminalWidth, layoutState, true);
+    const paneWidth = Math.max(16, widths.trace - 3);
 
     const keepIds = new Set(visibleRows.map((r) => r.node.ev.id));
     for (const [id, entry] of traceRowNodes.entries()) {
@@ -951,15 +1063,35 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
-  const renderAll = () => {
+  const renderLayout = () => {
     if (disposed) return;
     updatePaneVisibility();
     renderHeader();
     renderSandboxDetail();
     renderSessionsPane();
     renderTracePane();
-    renderDetailPane();
     renderFooter();
+    renderHelpOverlay();
+  };
+
+  const renderAll = () => {
+    if (disposed) return;
+    renderLayout();
+    renderDetailPane();
+  };
+
+  const applyTheme = (nextMode: 'dark' | 'light') => {
+    if (disposed || nextMode === resolvedTheme) return;
+    resolvedTheme = nextMode;
+    palette = getPalette(resolvedTheme);
+    detailPalette = getDetailPalette(resolvedTheme);
+    syntaxStyle.destroy();
+    syntaxStyle = createDetailSyntaxStyle(renderer, resolvedTheme);
+    headerBar.backgroundColor = palette.headerBg;
+    headerText.fg = palette.headerFg;
+    footerBar.backgroundColor = palette.footerBg;
+    footerText.fg = palette.headerFg;
+    renderAll();
   };
 
   const openSession = async (session: SessionRow, focusEventId?: string | null) => {
@@ -1316,6 +1448,37 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       options.onQuit();
       return;
     }
+    if (!key.ctrl && !key.meta && (key.sequence === '?' || (key.shift && key.name === '/'))) {
+      showHelp = !showHelp;
+      renderHelpOverlay();
+      return;
+    }
+    if (showHelp) {
+      if (!key.ctrl && !key.meta) {
+        if (key.name === 'escape' || key.name === 'esc' || key.sequence === '\x1b') {
+          showHelp = false;
+          renderHelpOverlay();
+          return;
+        }
+        if (key.name === 'j' || key.name === 'down') {
+          helpScroll.scrollBy(1);
+          return;
+        }
+        if (key.name === 'k' || key.name === 'up') {
+          helpScroll.scrollBy(-1);
+          return;
+        }
+        if (key.name === 'pagedown') {
+          helpScroll.scrollBy(8);
+          return;
+        }
+        if (key.name === 'pageup') {
+          helpScroll.scrollBy(-8);
+          return;
+        }
+      }
+      return;
+    }
     if (!key.ctrl && !key.meta && ((key.shift && key.name === 's') || key.sequence === 'S')) {
       showSandboxDetail = !showSandboxDetail;
       renderSandboxDetail();
@@ -1324,6 +1487,12 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     if (showSandboxDetail && !key.ctrl && !key.meta && key.name === 'escape') {
       showSandboxDetail = false;
       renderSandboxDetail();
+      return;
+    }
+    if (!key.ctrl && !key.meta && !key.shift && (key.name === 't' || key.sequence === 't')) {
+      const nextMode: 'dark' | 'light' = resolvedTheme === 'dark' ? 'light' : 'dark';
+      themeSetting = nextMode;
+      applyTheme(nextMode);
       return;
     }
     if (!progress.done) return;
@@ -1338,12 +1507,43 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
 
     if (!key.ctrl && !key.meta && key.name === 'tab' && activeSessionId) {
+      if (layoutState.detailZoomed) {
+        layoutState = toggleDetailZoom(layoutState);
+      }
       const order: FocusPane[] = ['sessions', 'trace', 'detail'];
       const idx = order.indexOf(focus);
       focus = order[(idx + (key.shift ? order.length - 1 : 1)) % order.length]!;
-      renderHeader();
-      updatePaneBorders();
+      renderLayout();
       return;
+    }
+
+    if (!key.ctrl && !key.meta && activeSessionId) {
+      if ((key.shift && key.name === 'z') || key.sequence === 'Z') {
+        layoutState = toggleDetailZoom(layoutState);
+        if (layoutState.detailZoomed) focus = 'detail';
+        renderLayout();
+        return;
+      }
+      if ((key.name === '[' || key.sequence === '[') && !layoutState.detailZoomed) {
+        layoutState = resizePane(layoutState, focus, -4);
+        renderLayout();
+        return;
+      }
+      if ((key.name === ']' || key.sequence === ']') && !layoutState.detailZoomed) {
+        layoutState = resizePane(layoutState, focus, 4);
+        renderLayout();
+        return;
+      }
+      if (key.name === '=' || key.sequence === '=') {
+        layoutState = resetPaneWidths(layoutState);
+        renderLayout();
+        return;
+      }
+      if (layoutState.detailZoomed && (key.name === 'escape' || key.name === 'esc' || key.sequence === '\x1b')) {
+        layoutState = toggleDetailZoom(layoutState);
+        renderLayout();
+        return;
+      }
     }
 
     // 1-9 quick-open works across panes
@@ -1517,7 +1717,19 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
     }
   };
 
+  const onResize = () => {
+    renderLayout();
+  };
+
+  const onThemeMode = (mode: unknown) => {
+    if (themeSetting === 'auto' && (mode === 'dark' || mode === 'light')) {
+      applyTheme(mode);
+    }
+  };
+
   renderer.keyInput.on('keypress', onKeypress);
+  renderer.on('resize', onResize);
+  renderer.on('theme_mode', onThemeMode);
 
   const offProgress =
     options.service.onProgress?.((p) => {
@@ -1553,7 +1765,10 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       offChange();
       offSandbox();
       renderer.keyInput.off('keypress', onKeypress);
+      renderer.off('resize', onResize);
+      renderer.off('theme_mode', onThemeMode);
       clearSandboxDetail();
+      clearHelpLines();
       clearSessionRows();
       clearTraceRows();
       syntaxStyle.destroy();
