@@ -5,10 +5,11 @@
   "private": true,
   "type": "module",
   "bin": {
-    "periscope": "./dist/cli/index.js"
+    "periscope": "./bin/periscope.mjs"
   },
   "files": [
-    "dist",
+    "bin",
+    "src",
     "README.md",
     "LICENSE*"
   ],
@@ -16,8 +17,6 @@
     "node": ">=26.4.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli/index.js', 0o755)\"",
-    "prepare": "npm run build",
     "test": "node --test --disable-warning=ExperimentalWarning 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

@@ -9,7 +9,7 @@ A full-screen terminal app to browse, search, and watch live the transcripts of 
 ## Run
 
 ```sh
-npm install          # installs @opentui/core and builds dist/ via prepare
+npm install          # installs @opentui/core; no build step required
 node src/cli/index.ts [options]
 # or install globally from a local clone or GitHub:
 npm link
@@ -24,6 +24,8 @@ Run tests and typecheck:
 ```sh
 npm test             # runs unit, service, and headless OpenTUI tests via node --test
 npm run typecheck    # tsc --noEmit -p tsconfig.json
+# Verify global Git installation of the current commit in a temporary prefix:
+sh scripts/test-git-install.sh
 ```
 
 ### CLI Options
