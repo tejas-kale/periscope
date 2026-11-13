@@ -86,6 +86,7 @@ import {
 import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
 import { createOpenTuiAdapter, type TuiAdapter } from './adapter.ts';
 import { buildHighlightedStyledText } from './highlight.ts';
+import { traceIcon } from '../view-model/trace-icons.ts';
 import {
   createDetailSyntaxStyle,
   getDetailPalette,
@@ -212,21 +213,11 @@ function formatSessionRowText(item: SessionListItem, now: number, maxWidth: numb
   return truncateText(`${prefix}${title}${suffix}`, maxWidth);
 }
 
-const KIND_ICON: Record<EventRow['kind'], string> = {
-  turn: '›',
-  reasoning: '◌',
-  text: '◆',
-  tool_call: '⚙',
-  tool_result: '↳',
-  error: '✕',
-  meta: '·',
-};
-
 function formatTraceRowText(row: Row, maxWidth: number): string {
   const ev = row.node.ev;
   const indent = '  '.repeat(row.depth);
   const twisty = row.hasChildren ? (row.expanded ? '▾ ' : '▸ ') : '  ';
-  const icon = KIND_ICON[ev.kind] ?? '·';
+  const icon = traceIcon(ev.kind, ev.tool_name);
   const tool = ev.kind === 'tool_call' && ev.tool_name ? `${ev.tool_name} ` : '';
   const dur = fmtDuration(row.node.duration);
   const tok = row.node.tokensOut > 0 ? fmtTokens(row.node.tokensIn + row.node.tokensOut) : '';
