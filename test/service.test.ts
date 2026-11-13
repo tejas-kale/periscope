@@ -285,6 +285,18 @@ test('sandbox poller with injectable exec, native presence, and readImage work a
       const dataUrl = await service.readImage(`file://${insideImg}`);
       assert.equal(dataUrl, `data:image/png;base64,${Buffer.from('pngbytes').toString('base64')}`);
       assert.equal(await service.readImage(outsideImg), null);
+
+      const claudeTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-test-'));
+      try {
+        const claudeTmpImg = path.join(claudeTmpDir, '1.png');
+        fs.writeFileSync(claudeTmpImg, 'claudepng');
+        assert.equal(
+          await service.readImage(claudeTmpImg),
+          `data:image/png;base64,${Buffer.from('claudepng').toString('base64')}`,
+        );
+      } finally {
+        fs.rmSync(claudeTmpDir, { recursive: true, force: true });
+      }
     } finally {
       await service.stop();
     }

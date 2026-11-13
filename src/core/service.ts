@@ -261,10 +261,19 @@ export class PeriscopeService implements PeriscopeApi {
     return this.sandbox;
   }
 
+  private isAllowedImagePath(abs: string): boolean {
+    if (this.roots.some((r) => abs.startsWith(r.dir + path.sep))) return true;
+    return (
+      abs.startsWith('/tmp/claude-') ||
+      abs.startsWith('/private/tmp/claude-') ||
+      abs.startsWith(`${path.resolve(os.tmpdir())}${path.sep}claude-`)
+    );
+  }
+
   async readImage(p: string): Promise<string | null> {
     const abs = path.resolve(p.replace(/^file:\/\//, ''));
     const mime = IMAGE_MIME[path.extname(abs).toLowerCase()];
-    if (!mime || !this.roots.some((r) => abs.startsWith(r.dir + path.sep))) return null;
+    if (!mime || !this.isAllowedImagePath(abs)) return null;
     try {
       const data = await fs.promises.readFile(abs);
       return `data:${mime};base64,${data.toString('base64')}`;

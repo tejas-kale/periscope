@@ -403,13 +403,45 @@ export function buildDetailModel(
   return { ...base, ...out, imageEventIds: [ev.id] };
 }
 
-/** Extract Claude base64 images and Antigravity media URIs from a raw transcript JSON record. */
+const TEXT_IMAGE_RE = /\[Image:\s*source:\s*([^\]]+)\]/g;
+const EXT_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+
+function mimeFromUri(uri: string): string {
+  const m = /\.[a-z0-9]+$/i.exec(uri);
+  return (m && EXT_MIME[m[0].toLowerCase()]) || 'image/png';
+}
+
+/** Extract Claude base64 images, `[Image: source: ...]` refs, and Antigravity media URIs from a raw transcript JSON record. */
 export function extractImageRefs(rawJson: string | null): ImageRef[] {
-  if (!rawJson || (!rawJson.includes('"image') && !rawJson.includes('"media"'))) return [];
+  if (!rawJson || (!rawJson.includes('"image') && !rawJson.includes('"media"') && !rawJson.includes('[Image: source:'))) return [];
   try {
     const d = JSON.parse(rawJson) as Record<string, unknown>;
     const out: ImageRef[] = [];
+    const seenUris = new Set<string>();
+    const pushUri = (uri: string, mimeType?: string) => {
+      if (!uri || seenUris.has(uri)) return;
+      seenUris.add(uri);
+      out.push({
+        kind: 'uri',
+        mimeType: mimeType ?? mimeFromUri(uri),
+        uri,
+        alt: uri.split('/').pop() || uri,
+        location: uri,
+      });
+    };
     const visit = (v: unknown) => {
+      if (typeof v === 'string') {
+        for (const m of v.matchAll(TEXT_IMAGE_RE)) {
+          pushUri(m[1]!.trim());
+        }
+        return;
+      }
       if (!v || typeof v !== 'object') return;
       if (Array.isArray(v)) {
         v.forEach(visit);
@@ -445,13 +477,7 @@ export function extractImageRefs(rawJson: string | null): ImageRef[] {
           typeof m?.mime_type === 'string' &&
           m.mime_type.startsWith('image/')
         ) {
-          out.push({
-            kind: 'uri',
-            mimeType: m.mime_type,
-            uri: m.uri,
-            alt: m.uri.split('/').pop() || m.uri,
-            location: m.uri,
-          });
+          pushUri(m.uri, m.mime_type);
         }
       }
     }

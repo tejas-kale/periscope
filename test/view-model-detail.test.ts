@@ -131,4 +131,21 @@ test('detail view-model: extractImageRefs finds Claude base64 and Antigravity me
   assert.deepEqual(extractImageRefs(agyRaw), [
     { kind: 'uri', mimeType: 'image/png', uri: '/tmp/screenshot.png', alt: 'screenshot.png', location: '/tmp/screenshot.png' },
   ]);
+
+  const claudeTextImgRaw = JSON.stringify({
+    message: {
+      content: [
+        { type: 'text', text: '[Image: source: /private/tmp/claude-501/-Users-foo/abc/images/1.png]' },
+      ],
+    },
+  });
+  assert.deepEqual(extractImageRefs(claudeTextImgRaw), [
+    {
+      kind: 'uri',
+      mimeType: 'image/png',
+      uri: '/private/tmp/claude-501/-Users-foo/abc/images/1.png',
+      alt: '1.png',
+      location: '/private/tmp/claude-501/-Users-foo/abc/images/1.png',
+    },
+  ]);
 });
