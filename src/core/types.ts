@@ -1,4 +1,4 @@
-export type Agent = 'claude' | 'codex' | 'antigravity';
+export type Agent = 'claude' | 'codex' | 'antigravity' | 'cursor';
 export type Host = 'native' | 'sandbox';
 export type EventKind = 'turn' | 'reasoning' | 'text' | 'tool_call' | 'tool_result' | 'error' | 'meta';
 

@@ -15,7 +15,7 @@ export interface SearchResultItem {
   quickIndex: number | null;
 }
 
-const AGENTS: readonly (Agent | undefined)[] = [undefined, 'claude', 'codex', 'antigravity'];
+const AGENTS: readonly (Agent | undefined)[] = [undefined, 'claude', 'codex', 'antigravity', 'cursor'];
 const HOSTS: readonly (Host | undefined)[] = [undefined, 'native', 'sandbox'];
 const STATUSES: readonly ('live' | 'idle' | undefined)[] = [undefined, 'live', 'idle'];
 const DATE_PRESETS: readonly Exclude<DateRangePreset, 'custom'>[] = ['all', '24h', '7d', '30d'];

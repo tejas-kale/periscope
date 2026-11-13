@@ -4,6 +4,7 @@ import type { Agent } from './types.ts';
 import type { Ingestor } from './ingest.ts';
 import type { Store } from './store.ts';
 import { AGENT_DIRS, AGY_METADATA, applyAgyMeta, classify, parseAgyMetadata, type AgyMeta, type TranscriptFile } from './sources.ts';
+import { ingestCursorStoreDb } from './parsers/cursor-store.ts';
 
 export interface NativeRoot {
   agent: Agent;
@@ -17,6 +18,8 @@ export function nativeRoots(home: string): { roots: NativeRoot[]; agyMetadata: s
       { agent: 'claude', dir: path.join(home, '.claude', AGENT_DIRS.claude) },
       { agent: 'codex', dir: path.join(home, '.codex', AGENT_DIRS.codex) },
       { agent: 'antigravity', dir: path.join(home, '.gemini', AGENT_DIRS.antigravity) },
+      { agent: 'cursor', dir: path.join(home, '.cursor', AGENT_DIRS.cursor) },
+      { agent: 'cursor', dir: path.join(home, '.cursor', 'chats') },
     ],
     agyMetadata: path.join(home, '.gemini', AGY_METADATA),
   };
@@ -61,8 +64,13 @@ export class NativeReader {
   }
 
   enqueue(abs: string): void {
+    const base = path.basename(abs);
     if (abs === this.agyMetadataPath) {
       this.agyMetaMtime = -1; // drain() re-reads it
+    } else if (base === 'store.db-wal' || base === 'store.db-shm' || base === 'meta.json') {
+      const dbPath = path.join(path.dirname(abs), 'store.db');
+      if (this.classify(dbPath)) this.queue.add(dbPath);
+      else return;
     } else if (this.classify(abs)) this.queue.add(abs);
     else return;
     if (!this.busy) {
@@ -118,6 +126,18 @@ export class NativeReader {
     const file = this.classify(abs);
     if (!file) return false;
     if (file.agent === 'antigravity') await this.refreshAgyMeta();
+    if (path.basename(abs) === 'store.db') {
+      const st = await fs.stat(abs);
+      let mtime = st.mtimeMs;
+      try {
+        const wal = await fs.stat(`${abs}-wal`);
+        mtime = Math.max(mtime, wal.mtimeMs);
+      } catch {
+        /* no WAL */
+      }
+      if (this.store.getFile(abs)?.mtime === mtime) return false;
+      return ingestCursorStoreDb(abs, this.store, file, mtime, st.size) > 0;
+    }
     let parentToolUseId: string | null = null;
     if (file.subagentMeta) {
       try {

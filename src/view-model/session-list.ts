@@ -41,6 +41,8 @@ export function formatAgent(agent: Agent): string {
       return 'Codex';
     case 'antigravity':
       return 'Antigravity';
+    case 'cursor':
+      return 'Cursor';
   }
 }
 

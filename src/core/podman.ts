@@ -11,6 +11,7 @@ export const VOLUMES: { name: string; roots: { agent: Agent; dir: string }[]; si
     roots: [
       { agent: 'claude', dir: AGENT_DIRS.claude },
       { agent: 'codex', dir: `codex/${AGENT_DIRS.codex}` },
+      { agent: 'cursor', dir: `cursor/${AGENT_DIRS.cursor}` },
     ],
     sidecars: [],
   },

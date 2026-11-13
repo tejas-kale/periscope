@@ -3,12 +3,14 @@ import type { Store } from './store.ts';
 import { claudeParser } from './parsers/claude.ts';
 import { codexParser } from './parsers/codex.ts';
 import { antigravityParser } from './parsers/antigravity.ts';
+import { cursorParser } from './parsers/cursor.ts';
 
-/** Where each agent keeps transcripts, relative to its home directory (`~/.claude`, `~/.codex`, `~/.gemini`). */
+/** Where each agent keeps transcripts, relative to its home directory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`). */
 export const AGENT_DIRS: Record<Agent, string> = {
   claude: 'projects',
   codex: 'sessions',
   antigravity: 'antigravity-cli/brain',
+  cursor: 'projects',
 };
 
 /** Sidecar file with Antigravity conversation titles and workspaces, relative to `~/.gemini`. */
@@ -18,6 +20,7 @@ export const PARSERS: Record<Agent, LineParser<any>> = {
   claude: claudeParser,
   codex: codexParser,
   antigravity: antigravityParser,
+  cursor: cursorParser,
 };
 
 export interface TranscriptFile {
@@ -37,6 +40,10 @@ const CLAUDE_MAIN = new RegExp(`^[^/]+/(${UUID})\\.jsonl$`);
 const CLAUDE_SUB = new RegExp(`^([^/]+/(${UUID})/subagents/agent-([\\w-]+))\\.jsonl$`);
 const CODEX = new RegExp(`(?:^|/)rollout-[^/]*?(${UUID})\\.jsonl$`);
 const AGY = new RegExp(`^(${UUID})/\\.system_generated/logs/transcript_full\\.jsonl$`);
+const CURSOR_MAIN = new RegExp(`^[^/]+/agent-transcripts/(${UUID})/\\1\\.jsonl$`);
+const CURSOR_FLAT = new RegExp(`^[^/]+/agent-transcripts/(${UUID})\\.jsonl$`);
+const CURSOR_SUB = new RegExp(`^[^/]+/agent-transcripts/(${UUID})/subagents/([\\w-]+)\\.jsonl$`);
+const CURSOR_STORE = new RegExp(`^[^/]+/(${UUID})/store\\.db$`);
 
 export function sessionIdFor(host: Host, conversation: string): string {
   return `${host === 'native' ? 'n' : 's'}:${conversation}`;
@@ -64,8 +71,14 @@ export function classify(agent: Agent, host: Host, rel: string): TranscriptFile 
     const m = rel.match(CODEX);
     return m ? mk(m[1], 'm') : null;
   }
-  const m = rel.match(AGY);
-  return m ? mk(m[1], 'm') : null;
+  if (agent === 'antigravity') {
+    const m = rel.match(AGY);
+    return m ? mk(m[1], 'm') : null;
+  }
+  let m = rel.match(CURSOR_MAIN) ?? rel.match(CURSOR_FLAT) ?? rel.match(CURSOR_STORE);
+  if (m) return mk(m[1], 'm');
+  m = rel.match(CURSOR_SUB);
+  return m ? mk(m[1], `a:${m[2]}`) : null;
 }
 
 export function projectName(cwd: string | null | undefined): string | null {

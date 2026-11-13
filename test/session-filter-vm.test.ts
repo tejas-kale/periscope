@@ -18,7 +18,8 @@ test('filter cyclers step through all options and wrap to undefined', () => {
   assert.equal(cycleAgentFilter(undefined), 'claude');
   assert.equal(cycleAgentFilter('claude'), 'codex');
   assert.equal(cycleAgentFilter('codex'), 'antigravity');
-  assert.equal(cycleAgentFilter('antigravity'), undefined);
+  assert.equal(cycleAgentFilter('antigravity'), 'cursor');
+  assert.equal(cycleAgentFilter('cursor'), undefined);
 
   assert.equal(cycleHostFilter(undefined), 'native');
   assert.equal(cycleHostFilter('native'), 'sandbox');

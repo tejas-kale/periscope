@@ -28,6 +28,13 @@ function makeSession(id: string, overrides: Partial<SessionRow> = {}): SessionRo
   };
 }
 
+test('session-list: formatAgent formats all supported agents', () => {
+  assert.equal(formatAgent('claude'), 'Claude Code');
+  assert.equal(formatAgent('codex'), 'Codex');
+  assert.equal(formatAgent('antigravity'), 'Antigravity');
+  assert.equal(formatAgent('cursor'), 'Cursor');
+});
+
 test('session-list: groups by project sorted by most recent activity, expands top 3, collapses rest', () => {
   const sessions = [
     makeSession('s-old', { project: 'delta', updated_at: 100 }),
