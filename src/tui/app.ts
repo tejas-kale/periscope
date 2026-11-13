@@ -85,7 +85,12 @@ import {
 } from '../view-model/clipboard.ts';
 import { fmtDuration, fmtTokens, hint, type Row } from '../view-model/tree.ts';
 import { createOpenTuiAdapter, type TuiAdapter } from './adapter.ts';
-import { buildHighlightedStyledText } from './highlight.ts';
+import {
+  buildHighlightedStyledText,
+  buildSegmentsStyledText,
+  truncateStyledSegments,
+  type StyledSegment,
+} from './highlight.ts';
 import { traceIcon } from '../view-model/trace-icons.ts';
 import {
   createDetailSyntaxStyle,
@@ -213,12 +218,17 @@ function formatSessionRowText(item: SessionListItem, now: number, maxWidth: numb
   return truncateText(`${prefix}${title}${suffix}`, maxWidth);
 }
 
-function formatTraceRowText(row: Row, maxWidth: number): string {
+function formatTraceRowStyledText(
+  row: Row,
+  maxWidth: number,
+  opts: { baseFg: RGBA; toolFg: RGBA; findQuery: string; matchBg: RGBA; matchFg: RGBA },
+): StyledText {
   const ev = row.node.ev;
   const indent = '  '.repeat(row.depth);
   const twisty = row.hasChildren ? (row.expanded ? '▾ ' : '▸ ') : '  ';
   const icon = traceIcon(ev.kind, ev.tool_name);
-  const tool = ev.kind === 'tool_call' && ev.tool_name ? `${ev.tool_name} ` : '';
+  const hasTool = ev.kind === 'tool_call' && Boolean(ev.tool_name);
+  const tool = hasTool ? `${ev.tool_name} ` : '';
   const dur = fmtDuration(row.node.duration);
   const tok = row.node.tokensOut > 0 ? fmtTokens(row.node.tokensIn + row.node.tokensOut) : '';
   const meta = [dur, tok].filter(Boolean).join(' ');
@@ -226,7 +236,21 @@ function formatTraceRowText(row: Row, maxWidth: number): string {
   const prefix = `${indent}${twisty}${icon} ${tool}`;
   const bodyBudget = Math.max(8, maxWidth - prefix.length - suffix.length);
   const body = truncateText(hint(ev), bodyBudget);
-  return truncateText(`${prefix}${body}${suffix}`, maxWidth);
+
+  const segments: StyledSegment[] = hasTool
+    ? [
+        { text: `${indent}${twisty}`, fg: opts.baseFg },
+        { text: `${icon} ${tool}`, fg: opts.toolFg },
+        { text: `${body}${suffix}`, fg: opts.baseFg },
+      ]
+    : [{ text: `${prefix}${body}${suffix}`, fg: opts.baseFg }];
+
+  return buildSegmentsStyledText(
+    truncateStyledSegments(segments, maxWidth),
+    opts.findQuery,
+    opts.matchBg,
+    opts.matchFg,
+  );
 }
 
 function decodeBase64DataUrl(dataUrl: string): Buffer | undefined {
@@ -999,11 +1023,15 @@ export function mountPeriscopeApp(renderer: CliRenderer, options: PeriscopeAppOp
       const isErr = row.node.ev.kind === 'error' || row.node.failed;
       const bg = isSel ? palette.selectedBg : isMatch ? palette.matchRowBg : undefined;
       const fg = isErr ? palette.errorFg : palette.fg;
-      const label = formatTraceRowText(row, paneWidth);
-      const content =
-        findQuery && label.toLowerCase().includes(findQuery.toLowerCase())
-          ? buildHighlightedStyledText(label, findQuery, RGBA.fromHex(fg), matchBg, matchFg)
-          : label;
+      const baseFg = RGBA.fromHex(fg);
+      const toolFg = RGBA.fromHex(isErr ? palette.errorFg : palette.groupFg);
+      const content = formatTraceRowStyledText(row, paneWidth, {
+        baseFg,
+        toolFg,
+        findQuery,
+        matchBg,
+        matchFg,
+      });
 
       let entry = traceRowNodes.get(id);
       if (!entry) {
